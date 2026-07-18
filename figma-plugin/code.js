@@ -15,6 +15,10 @@ function findNodeByName(name) {
   return figma.currentPage.findOne((node) => node.name === name);
 }
 
+function findNodesByName(name) {
+  return figma.currentPage.findAll((node) => node.name === name);
+}
+
 function nearestGrid(value, gridSize) {
   if (gridSize <= 1) {
     return value;
@@ -197,6 +201,117 @@ async function deleteNodeByName(nodeName) {
   return true;
 }
 
+function defaultTabOrigin(index) {
+  return {
+    x: 48 + index * 220,
+    y: 40,
+    width: 200,
+    height: 52,
+  };
+}
+
+function defaultPanelOrigin(index) {
+  return {
+    x: 48 + (index % 3) * 360,
+    y: 130 + Math.floor(index / 3) * 220,
+    width: 336,
+    height: 190,
+  };
+}
+
+function ensureFrameNode(name, index, kind) {
+  const existing = findNodeByName(name);
+  if (existing && existing.type === "FRAME") {
+    return existing;
+  }
+
+  const frame = figma.createFrame();
+  frame.name = name;
+  const origin = kind === "tab" ? defaultTabOrigin(index) : defaultPanelOrigin(index);
+  frame.x = origin.x;
+  frame.y = origin.y;
+  frame.resize(origin.width, origin.height);
+  frame.fills = [{ type: "SOLID", color: { r: 0.08, g: 0.11, b: 0.17 } }];
+  frame.strokes = [{ type: "SOLID", color: { r: 0.18, g: 0.24, b: 0.34 } }];
+  frame.strokeWeight = 1;
+  figma.currentPage.appendChild(frame);
+  return frame;
+}
+
+async function ensureHiddenDetectionLayer(tabName) {
+  const tabNode = findNodeByName(tabName);
+  if (!tabNode || tabNode.type !== "FRAME") {
+    return false;
+  }
+
+  const markerName = `${tabName}__detect`;
+  const already = tabNode.findOne((node) => node.name === markerName);
+  if (already) {
+    already.visible = false;
+    return true;
+  }
+
+  const marker = figma.createText();
+  marker.name = markerName;
+  await figma.loadFontAsync(marker.fontName);
+  marker.characters = tabName;
+  marker.x = 2;
+  marker.y = 2;
+  marker.visible = false;
+  tabNode.appendChild(marker);
+  return true;
+}
+
+function applyRenameMap(renameMap) {
+  let renamed = 0;
+  for (const [from, to] of Object.entries(renameMap)) {
+    const targets = findNodesByName(from);
+    for (const node of targets) {
+      if (node.name !== to) {
+        node.name = to;
+        renamed += 1;
+      }
+    }
+  }
+  return renamed;
+}
+
+async function applyRewritePayload(payload) {
+  const renameMap = payload.rename ?? {};
+  const panelRenameMap = payload.panelRename ?? {};
+  const hiddenTargets = Array.isArray(payload.createHiddenLayers) ? payload.createHiddenLayers : [];
+  const autoCreateTabs = Array.isArray(payload.autoCreate?.tabs) ? payload.autoCreate.tabs : [];
+  const autoCreatePanels = Array.isArray(payload.autoCreate?.panels) ? payload.autoCreate.panels : [];
+
+  const renamedTabs = applyRenameMap(renameMap);
+  const renamedPanels = applyRenameMap(panelRenameMap);
+
+  let createdTabs = 0;
+  autoCreateTabs.forEach((name, index) => {
+    if (!findNodeByName(name)) {
+      ensureFrameNode(name, index, "tab");
+      createdTabs += 1;
+    }
+  });
+
+  let createdPanels = 0;
+  autoCreatePanels.forEach((name, index) => {
+    if (!findNodeByName(name)) {
+      ensureFrameNode(name, index, "panel");
+      createdPanels += 1;
+    }
+  });
+
+  let hiddenCreated = 0;
+  for (const tabName of hiddenTargets) {
+    if (await ensureHiddenDetectionLayer(tabName)) {
+      hiddenCreated += 1;
+    }
+  }
+
+  return `rewrite applied: renamed=${renamedTabs + renamedPanels}, createdTabs=${createdTabs}, createdPanels=${createdPanels}, hiddenMarkers=${hiddenCreated}`;
+}
+
 function normalizeCreateSpecs(payload) {
   if (Array.isArray(payload.componentCreate)) {
     return payload.componentCreate;
@@ -217,6 +332,13 @@ function normalizeCreateSpecs(payload) {
 
 async function applyPayload(payload) {
   const operation = (payload.meta && payload.meta.operation) ?? "update";
+
+  if (operation === "rewrite") {
+    const result = await applyRewritePayload(payload);
+    figma.notify(`Mediator sync ${result}`);
+    return;
+  }
+
   const textBindings = normalizeTextBindings(payload);
   const bindingEntries = Object.entries(textBindings);
   const createSpecs = normalizeCreateSpecs(payload);

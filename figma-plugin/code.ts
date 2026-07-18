@@ -32,10 +32,17 @@ interface MediatorPayload {
   meta?: {
     source?: string;
     timestamp?: string;
-    operation?: "update" | "create" | "delete";
+    operation?: "update" | "create" | "delete" | "rewrite";
   };
   textBindings?: Record<string, string>;
   componentCreate?: ComponentCreateSpec[];
+  rename?: Record<string, string>;
+  panelRename?: Record<string, string>;
+  createHiddenLayers?: string[];
+  autoCreate?: {
+    tabs?: string[];
+    panels?: string[];
+  };
   layoutRules?: LayoutRules;
   createNodes?: Array<{
     type: "frame" | "rectangle" | "text";
@@ -63,6 +70,11 @@ function hexToRgb(hex: string): RGB | null {
 
 function findNodeByName(name: string): SceneNode | null {
   return figma.currentPage.findOne((node) => node.name === name) as SceneNode | null;
+}
+
+function findNodesByName(name: string): SceneNode[] {
+  const found = figma.currentPage.findAll((node) => node.name === name);
+  return found as SceneNode[];
 }
 
 function nearestGrid(value: number, gridSize: number): number {
@@ -255,6 +267,117 @@ async function deleteNodeByName(nodeName: string): Promise<boolean> {
   return true;
 }
 
+function defaultTabOrigin(index: number): { x: number; y: number; width: number; height: number } {
+  return {
+    x: 48 + index * 220,
+    y: 40,
+    width: 200,
+    height: 52,
+  };
+}
+
+function defaultPanelOrigin(index: number): { x: number; y: number; width: number; height: number } {
+  return {
+    x: 48 + (index % 3) * 360,
+    y: 130 + Math.floor(index / 3) * 220,
+    width: 336,
+    height: 190,
+  };
+}
+
+function ensureFrameNode(name: string, index: number, kind: "tab" | "panel"): FrameNode {
+  const existing = findNodeByName(name);
+  if (existing && existing.type === "FRAME") {
+    return existing;
+  }
+
+  const frame = figma.createFrame();
+  frame.name = name;
+  const origin = kind === "tab" ? defaultTabOrigin(index) : defaultPanelOrigin(index);
+  frame.x = origin.x;
+  frame.y = origin.y;
+  frame.resize(origin.width, origin.height);
+  frame.fills = [{ type: "SOLID", color: { r: 0.08, g: 0.11, b: 0.17 } }];
+  frame.strokes = [{ type: "SOLID", color: { r: 0.18, g: 0.24, b: 0.34 } }];
+  frame.strokeWeight = 1;
+  figma.currentPage.appendChild(frame);
+  return frame;
+}
+
+async function ensureHiddenDetectionLayer(tabName: string): Promise<boolean> {
+  const tabNode = findNodeByName(tabName);
+  if (!tabNode || tabNode.type !== "FRAME") {
+    return false;
+  }
+
+  const markerName = `${tabName}__detect`;
+  const already = tabNode.findOne((node) => node.name === markerName);
+  if (already) {
+    already.visible = false;
+    return true;
+  }
+
+  const marker = figma.createText();
+  marker.name = markerName;
+  await figma.loadFontAsync(marker.fontName as FontName);
+  marker.characters = tabName;
+  marker.x = 2;
+  marker.y = 2;
+  marker.visible = false;
+  tabNode.appendChild(marker);
+  return true;
+}
+
+function applyRenameMap(renameMap: Record<string, string>): number {
+  let renamed = 0;
+  for (const [from, to] of Object.entries(renameMap)) {
+    const targets = findNodesByName(from);
+    for (const node of targets) {
+      if (node.name !== to) {
+        node.name = to;
+        renamed += 1;
+      }
+    }
+  }
+  return renamed;
+}
+
+async function applyRewritePayload(payload: MediatorPayload): Promise<string> {
+  const renameMap = payload.rename ?? {};
+  const panelRenameMap = payload.panelRename ?? {};
+  const hiddenTargets = Array.isArray(payload.createHiddenLayers) ? payload.createHiddenLayers : [];
+  const autoCreateTabs = Array.isArray(payload.autoCreate?.tabs) ? payload.autoCreate?.tabs ?? [] : [];
+  const autoCreatePanels = Array.isArray(payload.autoCreate?.panels) ? payload.autoCreate?.panels ?? [] : [];
+
+  const renamedTabs = applyRenameMap(renameMap);
+  const renamedPanels = applyRenameMap(panelRenameMap);
+
+  let createdTabs = 0;
+  autoCreateTabs.forEach((name, index) => {
+    if (!findNodeByName(name)) {
+      ensureFrameNode(name, index, "tab");
+      createdTabs += 1;
+    }
+  });
+
+  let createdPanels = 0;
+  autoCreatePanels.forEach((name, index) => {
+    if (!findNodeByName(name)) {
+      ensureFrameNode(name, index, "panel");
+      createdPanels += 1;
+    }
+  });
+
+  let hiddenCreated = 0;
+  for (const tabName of hiddenTargets) {
+    if (await ensureHiddenDetectionLayer(tabName)) {
+      hiddenCreated += 1;
+    }
+  }
+
+  return `rewrite applied: renamed=${renamedTabs + renamedPanels}, createdTabs=${createdTabs}, createdPanels=${createdPanels}, hiddenMarkers=${hiddenCreated}`;
+}
+
 function normalizeCreateSpecs(payload: MediatorPayload): ComponentCreateSpec[] {
   if (Array.isArray(payload.componentCreate)) {
     return payload.componentCreate;
@@ -275,6 +398,13 @@ function normalizeCreateSpecs(payload: MediatorPayload): ComponentCreateSpec[] {
 
 async function applyPayload(payload: MediatorPayload): Promise<void> {
   const operation = payload.meta?.operation ?? "update";
+
+  if (operation === "rewrite") {
+    const result = await applyRewritePayload(payload);
+    figma.notify(`Mediator sync ${result}`);
+    return;
+  }
+
   const textBindings = normalizeTextBindings(payload);
   const bindingEntries = Object.entries(textBindings);
   const createSpecs = normalizeCreateSpecs(payload);
