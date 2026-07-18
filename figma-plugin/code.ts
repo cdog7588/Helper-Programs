@@ -4,20 +4,49 @@ type JsonValue = string | number | boolean | null | JsonObject | JsonArray;
 interface JsonObject { [key: string]: JsonValue; }
 interface JsonArray extends Array<JsonValue> {}
 
-interface CreateNodeSpec {
-  type: "frame" | "rectangle" | "text";
+interface LayoutRules {
+  gridSize?: number;
+  padding?: number;
+  alignment?: "left" | "center" | "right";
+}
+
+interface ComponentStyle {
+  fill?: string;
+  stroke?: string;
+  fontSize?: number;
+  fontFamily?: string;
+}
+
+interface ComponentCreateSpec {
+  type: "FRAME" | "TEXT" | "RECTANGLE" | "COMPONENT";
   name: string;
-  x?: number;
-  y?: number;
-  width?: number;
-  height?: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  style?: ComponentStyle;
   text?: string;
-  fillHex?: string;
 }
 
 interface MediatorPayload {
+  meta?: {
+    source?: string;
+    timestamp?: string;
+    operation?: "update" | "create" | "delete";
+  };
   textBindings?: Record<string, string>;
-  createNodes?: CreateNodeSpec[];
+  componentCreate?: ComponentCreateSpec[];
+  layoutRules?: LayoutRules;
+  createNodes?: Array<{
+    type: "frame" | "rectangle" | "text";
+    name: string;
+    x?: number;
+    y?: number;
+    width?: number;
+    height?: number;
+    text?: string;
+    fillHex?: string;
+  }>;
   [key: string]: JsonValue;
 }
 
@@ -34,6 +63,35 @@ function hexToRgb(hex: string): RGB | null {
 
 function findNodeByName(name: string): SceneNode | null {
   return figma.currentPage.findOne((node) => node.name === name) as SceneNode | null;
+}
+
+function nearestGrid(value: number, gridSize: number): number {
+  if (gridSize <= 1) {
+    return value;
+  }
+  return Math.round(value / gridSize) * gridSize;
+}
+
+function normalizeSpec(spec: ComponentCreateSpec, rules?: LayoutRules): ComponentCreateSpec {
+  const gridSize = Math.max(1, Number(rules?.gridSize ?? 1));
+  const padding = Math.max(0, Number(rules?.padding ?? 0));
+  const alignment = rules?.alignment ?? "left";
+
+  let x = nearestGrid(spec.x, gridSize);
+  let y = nearestGrid(spec.y, gridSize);
+  const width = Math.max(gridSize, nearestGrid(spec.width, gridSize));
+  const height = Math.max(gridSize, nearestGrid(spec.height, gridSize));
+
+  const viewport = figma.viewport.bounds;
+  if (alignment === "center") {
+    x = nearestGrid(viewport.x + viewport.width / 2 - width / 2, gridSize);
+  } else if (alignment === "right") {
+    x = nearestGrid(viewport.x + viewport.width - padding - width, gridSize);
+  }
+
+  y = y + padding;
+
+  return { ...spec, x, y, width, height };
 }
 
 function findTextTarget(node: SceneNode): TextNode | null {
@@ -65,6 +123,25 @@ async function setTextOnNamedNode(nodeName: string, value: string): Promise<bool
   return true;
 }
 
+function applyNodeStyle(node: SceneNode, style?: ComponentStyle): void {
+  if (!style) {
+    return;
+  }
+
+  const fill = style.fill ? hexToRgb(style.fill) : null;
+  const stroke = style.stroke ? hexToRgb(style.stroke) : null;
+
+  if (fill && "fills" in node) {
+    node.fills = [{ type: "SOLID", color: fill }];
+  }
+  if (stroke && "strokes" in node) {
+    node.strokes = [{ type: "SOLID", color: stroke }];
+    if ("strokeWeight" in node) {
+      node.strokeWeight = 1;
+    }
+  }
+}
+
 function normalizeTextBindings(payload: MediatorPayload): Record<string, string> {
   if (payload.textBindings && typeof payload.textBindings === "object") {
     return payload.textBindings;
@@ -88,53 +165,136 @@ function normalizeTextBindings(payload: MediatorPayload): Record<string, string>
   return inferred;
 }
 
-async function applyCreateNode(spec: CreateNodeSpec): Promise<void> {
-  const x = spec.x ?? 0;
-  const y = spec.y ?? 0;
-  const width = spec.width ?? 240;
-  const height = spec.height ?? 96;
+async function applyCreateNode(spec: ComponentCreateSpec, rules?: LayoutRules): Promise<void> {
+  const normalized = normalizeSpec(spec, rules);
+  const { x, y, width, height } = normalized;
 
-  if (spec.type === "frame") {
-    const node = figma.createFrame();
-    node.name = spec.name;
-    node.x = x;
-    node.y = y;
-    node.resize(width, height);
-    const rgb = spec.fillHex ? hexToRgb(spec.fillHex) : null;
-    if (rgb) {
-      node.fills = [{ type: "SOLID", color: rgb }];
+  if (normalized.type === "FRAME") {
+    const frame = figma.createFrame();
+    frame.name = normalized.name;
+    frame.x = x;
+    frame.y = y;
+    frame.resize(width, height);
+    applyNodeStyle(frame, normalized.style);
+
+    if (normalized.text) {
+      const textNode = figma.createText();
+      await figma.loadFontAsync(textNode.fontName as FontName);
+      textNode.characters = normalized.text;
+      textNode.x = 12;
+      textNode.y = 12;
+      if (normalized.style?.fontSize) {
+        textNode.fontSize = normalized.style.fontSize;
+      }
+      frame.appendChild(textNode);
     }
-    figma.currentPage.appendChild(node);
+    figma.currentPage.appendChild(frame);
     return;
   }
 
-  if (spec.type === "rectangle") {
-    const node = figma.createRectangle();
-    node.name = spec.name;
-    node.x = x;
-    node.y = y;
-    node.resize(width, height);
-    const rgb = spec.fillHex ? hexToRgb(spec.fillHex) : null;
-    if (rgb) {
-      node.fills = [{ type: "SOLID", color: rgb }];
+  if (normalized.type === "COMPONENT") {
+    const component = figma.createComponent();
+    component.name = normalized.name;
+    component.x = x;
+    component.y = y;
+    component.resize(width, height);
+    applyNodeStyle(component, normalized.style);
+
+    if (normalized.text) {
+      const textNode = figma.createText();
+      await figma.loadFontAsync(textNode.fontName as FontName);
+      textNode.characters = normalized.text;
+      textNode.x = 12;
+      textNode.y = 12;
+      if (normalized.style?.fontSize) {
+        textNode.fontSize = normalized.style.fontSize;
+      }
+      component.appendChild(textNode);
     }
-    figma.currentPage.appendChild(node);
+    figma.currentPage.appendChild(component);
     return;
   }
 
-  const node = figma.createText();
-  node.name = spec.name;
-  node.x = x;
-  node.y = y;
-  node.resize(width, height);
-  await figma.loadFontAsync(node.fontName as FontName);
-  node.characters = spec.text ?? spec.name;
-  figma.currentPage.appendChild(node);
+  if (normalized.type === "RECTANGLE") {
+    const rect = figma.createRectangle();
+    rect.name = normalized.name;
+    rect.x = x;
+    rect.y = y;
+    rect.resize(width, height);
+    applyNodeStyle(rect, normalized.style);
+    figma.currentPage.appendChild(rect);
+    return;
+  }
+
+  const textNode = figma.createText();
+  textNode.name = normalized.name;
+  textNode.x = x;
+  textNode.y = y;
+  textNode.resize(width, height);
+  await figma.loadFontAsync(textNode.fontName as FontName);
+  textNode.characters = normalized.text ?? normalized.name;
+  if (normalized.style?.fontSize) {
+    textNode.fontSize = normalized.style.fontSize;
+  }
+  if (normalized.style?.fontFamily) {
+    textNode.fontName = {
+      family: normalized.style.fontFamily,
+      style: "Regular",
+    };
+  }
+  applyNodeStyle(textNode, normalized.style);
+  figma.currentPage.appendChild(textNode);
+}
+
+async function deleteNodeByName(nodeName: string): Promise<boolean> {
+  const target = findNodeByName(nodeName);
+  if (!target) {
+    return false;
+  }
+  target.remove();
+  return true;
+}
+
+function normalizeCreateSpecs(payload: MediatorPayload): ComponentCreateSpec[] {
+  if (Array.isArray(payload.componentCreate)) {
+    return payload.componentCreate;
+  }
+
+  const legacy = Array.isArray(payload.createNodes) ? payload.createNodes : [];
+  return legacy.map((item) => ({
+    name: item.name,
+    type: String(item.type).toUpperCase() as "FRAME" | "TEXT" | "RECTANGLE" | "COMPONENT",
+    x: item.x ?? 0,
+    y: item.y ?? 0,
+    width: item.width ?? 240,
+    height: item.height ?? 96,
+    text: item.text,
+    style: item.fillHex ? { fill: item.fillHex } : undefined,
+  }));
 }
 
 async function applyPayload(payload: MediatorPayload): Promise<void> {
+  const operation = payload.meta?.operation ?? "update";
   const textBindings = normalizeTextBindings(payload);
   const bindingEntries = Object.entries(textBindings);
+  const createSpecs = normalizeCreateSpecs(payload);
+  const layoutRules = payload.layoutRules;
+
+  if (operation === "delete") {
+    let removed = 0;
+    for (const [name] of bindingEntries) {
+      if (await deleteNodeByName(name)) {
+        removed += 1;
+      }
+    }
+    for (const spec of createSpecs) {
+      if (await deleteNodeByName(spec.name)) {
+        removed += 1;
+      }
+    }
+    figma.notify(`Mediator sync delete applied: ${removed} nodes removed`);
+    return;
+  }
 
   let updated = 0;
   for (const [name, value] of bindingEntries) {
@@ -143,19 +303,18 @@ async function applyPayload(payload: MediatorPayload): Promise<void> {
     }
   }
 
-  const createNodes = Array.isArray(payload.createNodes) ? payload.createNodes : [];
-  for (const item of createNodes) {
-    if (!item || typeof item !== "object") {
-      continue;
+  let created = 0;
+  if (operation === "create" || operation === "update") {
+    for (const spec of createSpecs) {
+      if (!spec || !spec.type || !spec.name) {
+        continue;
+      }
+      await applyCreateNode(spec, layoutRules);
+      created += 1;
     }
-    const nodeSpec = item as unknown as CreateNodeSpec;
-    if (!nodeSpec.type || !nodeSpec.name) {
-      continue;
-    }
-    await applyCreateNode(nodeSpec);
   }
 
-  figma.notify(`Mediator sync applied: ${updated} text bindings, ${createNodes.length} creates`);
+  figma.notify(`Mediator sync ${operation} applied: ${updated} text bindings, ${created} creates`);
 }
 
 figma.ui.onmessage = async (msg: { type?: string; payload?: MediatorPayload }) => {

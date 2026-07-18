@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -41,6 +42,8 @@ PROJECTS_FILE = APP_STATE_DIR / "projects.json"
 FIGMA_SYNC_LOG = APP_STATE_DIR / "figma_sync.log"
 FIGMA_DESIGN_CACHE = APP_STATE_DIR / "figma_design_cache.json"
 PLUGIN_CONTRACT_REL_PATH = Path(".mediator") / "figma_plugin_contract.json"
+PLUGIN_PAYLOAD_REL_PATH = Path(".mediator") / "figma_payload.latest.json"
+DEFAULT_FIGMA_PLUGIN_ENDPOINT = "http://127.0.0.1:8080/figma-plugin"
 
 FIGMA_META_TABS: list[str] = []
 FIGMA_PANELS: list[str] = []
@@ -522,6 +525,22 @@ QLabel {{ color: {text}; }}
 
 def project_contract_path(project_root: Path) -> Path:
     return project_root / PLUGIN_CONTRACT_REL_PATH
+
+
+def project_payload_path(project_root: Path) -> Path:
+    return project_root / PLUGIN_PAYLOAD_REL_PATH
+
+
+def post_to_local_figma_plugin(payload: dict[str, Any], endpoint: str | None = None) -> str:
+    target = endpoint or os.environ.get("MEDIATOR_FIGMA_PLUGIN_ENDPOINT", DEFAULT_FIGMA_PLUGIN_ENDPOINT)
+    try:
+        response = requests.post(target, json=payload, timeout=5)
+    except requests.RequestException as exc:
+        return f"Local Figma plugin push failed: {exc}"
+
+    if response.status_code >= 400:
+        return f"Local Figma plugin push failed ({response.status_code}): {response.text[:240]}"
+    return f"Local Figma plugin push succeeded ({response.status_code})"
 
 
 class ArchitectureWindow(QWidget):
@@ -1324,9 +1343,67 @@ class LiveFigmaWindow(QWidget):
             if isinstance(node_id, str):
                 target_node_id = node_id
 
-        result = post_figma_comment(message, target_node_id)
-        self.output.setPlainText(result)
-        self.add_activity(result)
+        payload = self.build_figma_plugin_payload(summary, raw_json)
+        payload_path = project_payload_path(self.project_root)
+        payload_path.parent.mkdir(parents=True, exist_ok=True)
+        payload_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+        figma_comment_result = post_figma_comment(message, target_node_id)
+        local_push_result = post_to_local_figma_plugin(payload)
+        output = (
+            f"{figma_comment_result}\n"
+            f"{local_push_result}\n"
+            f"Plugin payload saved: {payload_path}"
+        )
+        self.output.setPlainText(output)
+        self.add_activity(figma_comment_result)
+        self.add_activity(local_push_result)
+
+    def build_figma_plugin_payload(self, summary: str, raw_json: str) -> dict[str, Any]:
+        operation = "update"
+        sync_time = datetime.now().isoformat(timespec="seconds")
+
+        healthy_state = "Healthy"
+        if "fallback" in summary.lower():
+            healthy_state = "Warning"
+
+        component_create: list[dict[str, Any]] = []
+        if "card_project_active" not in self.named_nodes:
+            component_create.append(
+                {
+                    "name": "card_project_active",
+                    "type": "FRAME",
+                    "x": 64,
+                    "y": 148,
+                    "width": 280,
+                    "height": 120,
+                    "style": {
+                        "fill": "#152033",
+                        "stroke": "#2c3f5f",
+                    },
+                    "text": f"{self.project_root.name} active",
+                }
+            )
+
+        return {
+            "meta": {
+                "source": "mediator_app",
+                "timestamp": sync_time,
+                "operation": operation,
+            },
+            "textBindings": {
+                "panel_backend_layers": summary,
+                "panel_dashboard_activity_feed": f"Last sync: {sync_time}",
+                "status_global_healthy": healthy_state,
+            },
+            "componentCreate": component_create,
+            "layoutRules": {
+                "gridSize": 8,
+                "padding": 16,
+                "alignment": "left",
+            },
+            "backendArchitecture": json.loads(raw_json) if raw_json.strip().startswith("{") else {},
+        }
 
     def build_plugin_contract(self) -> dict[str, Any]:
         summary, raw_json = parse_architecture(self.project_root)

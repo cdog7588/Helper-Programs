@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MediatorFigmaPayload",
+  "type": "object",
+  "properties": {
+    "meta": {
+      "type": "object",
+      "description": "General metadata for the sync operation",
+      "properties": {
+        "source": {
+          "type": "string",
+          "examples": ["mediator_app"]
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "operation": {
+          "type": "string",
+          "enum": ["update", "create", "delete"]
+        }
+      },
+      "required": ["source", "timestamp", "operation"],
+      "additionalProperties": false
+    },
+    "textBindings": {
+      "type": "object",
+      "description": "Map of Figma node names to text content",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "examples": [
+        {
+          "panel_backend_layers": "Updated backend summary",
+          "status_global_healthy": "Healthy",
+          "panel_dashboard_activity_feed": "Last sync: 6:42 PM"
+        }
+      ]
+    },
+    "componentCreate": {
+      "type": "array",
+      "description": "List of new components to generate",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["FRAME", "TEXT", "RECTANGLE", "COMPONENT"]
+          },
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "width": {
+            "type": "number"
+          },
+          "height": {
+            "type": "number"
+          },
+          "style": {
+            "type": "object",
+            "properties": {
+              "fill": {
+                "type": "string",
+                "pattern": "^#[0-9a-fA-F]{6}$"
+              },
+              "stroke": {
+                "type": "string",
+                "pattern": "^#[0-9a-fA-F]{6}$"
+              },
+              "fontSize": {
+                "type": "number"
+              },
+              "fontFamily": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": ["name", "type", "x", "y", "width", "height"],
+        "additionalProperties": false
+      }
+    },
+    "layoutRules": {
+      "type": "object",
+      "description": "Optional layout grid or spacing rules",
+      "properties": {
+        "gridSize": {
+          "type": "number",
+          "examples": [8]
+        },
+        "padding": {
+          "type": "number",
+          "examples": [16]
+        },
+        "alignment": {
+          "type": "string",
+          "enum": ["left", "center", "right"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "backendArchitecture": {
+      "type": "object",
+      "description": "Optional architecture snapshot attached by mediator for richer plugin actions."
+    }
+  },
+  "required": ["meta"],
+  "additionalProperties": true
+}

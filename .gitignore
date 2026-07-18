@@ -66,3 +66,8 @@ Desktop.ini
 # Local tools folder (auto-linked)
 # ============================
 tools/
+
+# ============================
+# Local mediator plugin payload cache
+# ============================
+.mediator/
