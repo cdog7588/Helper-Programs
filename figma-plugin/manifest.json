@@ -1,0 +1,13 @@
+{
+  "name": "Mediator Sync Companion",
+  "id": "mediator-sync-companion-local",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma"],
+  "permissions": ["currentuser", "activeusers"],
+  "networkAccess": {
+    "allowedDomains": ["http://127.0.0.1:*", "http://localhost:*", "https://*"],
+    "reasoning": "Mediator local bridge can publish JSON payloads for live design sync."
+  }
+}

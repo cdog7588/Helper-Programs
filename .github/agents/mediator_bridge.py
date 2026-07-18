@@ -5,8 +5,32 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
+from typing import Any
+
+
+def push_to_figma_plugin(
+    payload: dict[str, Any],
+    endpoint: str = "http://127.0.0.1:8080/figma-plugin",
+    timeout: float = 5.0,
+) -> str:
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            response_body = response.read().decode("utf-8", errors="ignore")
+            return f"Figma plugin push succeeded ({response.status}). {response_body[:240]}"
+    except urllib.error.URLError as exc:
+        return f"Figma plugin push failed: {exc}"
 
 
 def activate_framework_mediator(task: str) -> str:
