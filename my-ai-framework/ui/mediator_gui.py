@@ -39,6 +39,7 @@ else:
 APP_STATE_DIR = Path.home() / ".mediator_desktop"
 PROJECTS_FILE = APP_STATE_DIR / "projects.json"
 FIGMA_SYNC_LOG = APP_STATE_DIR / "figma_sync.log"
+FIGMA_DESIGN_CACHE = APP_STATE_DIR / "figma_design_cache.json"
 PLUGIN_CONTRACT_REL_PATH = Path(".mediator") / "figma_plugin_contract.json"
 
 FIGMA_META_TABS: list[str] = []
@@ -346,6 +347,177 @@ def post_figma_comment(message: str, node_id: str | None = None) -> str:
     if response.status_code >= 400:
         return f"Figma comment push failed ({response.status_code}): {response.text[:240]}"
     return "Figma comment push succeeded."
+
+
+def _rgb_from_figma_color(color: dict[str, Any], default: tuple[int, int, int]) -> tuple[int, int, int]:
+    try:
+        return (
+            int(float(color.get("r", default[0] / 255.0)) * 255),
+            int(float(color.get("g", default[1] / 255.0)) * 255),
+            int(float(color.get("b", default[2] / 255.0)) * 255),
+        )
+    except (TypeError, ValueError, AttributeError):
+        return default
+
+
+def _hex_from_rgb(rgb: tuple[int, int, int]) -> str:
+    return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+
+
+def extract_design_tokens(figma_json: dict[str, Any]) -> dict[str, Any]:
+    named = figma_named_nodes(figma_json)
+    defaults = {
+        "background": "#0d1117",
+        "surface": "#0f1624",
+        "surface_alt": "#152033",
+        "text": "#d7dde8",
+        "muted_text": "#9bb2d1",
+        "accent": "#3b82f6",
+        "border": "#253147",
+    }
+
+    root = figma_json.get("document") if isinstance(figma_json, dict) else None
+    if isinstance(root, dict):
+        fills = root.get("fills")
+        if isinstance(fills, list):
+            for fill in fills:
+                if isinstance(fill, dict) and fill.get("type") == "SOLID":
+                    color = fill.get("color")
+                    if isinstance(color, dict):
+                        defaults["background"] = _hex_from_rgb(
+                            _rgb_from_figma_color(color, (13, 17, 23))
+                        )
+                        break
+
+    sample_panel = named.get("panel_dashboard_activity_feed")
+    if isinstance(sample_panel, dict):
+        fills = sample_panel.get("fills")
+        if isinstance(fills, list):
+            for fill in fills:
+                if isinstance(fill, dict) and fill.get("type") == "SOLID":
+                    color = fill.get("color")
+                    if isinstance(color, dict):
+                        defaults["surface"] = _hex_from_rgb(
+                            _rgb_from_figma_color(color, (15, 22, 36))
+                        )
+                        break
+
+    sample_button = named.get("btn_figma_pull")
+    if isinstance(sample_button, dict):
+        fills = sample_button.get("fills")
+        if isinstance(fills, list):
+            for fill in fills:
+                if isinstance(fill, dict) and fill.get("type") == "SOLID":
+                    color = fill.get("color")
+                    if isinstance(color, dict):
+                        defaults["accent"] = _hex_from_rgb(
+                            _rgb_from_figma_color(color, (59, 130, 246))
+                        )
+                        break
+
+    sample_card = named.get("card_project_status")
+    if isinstance(sample_card, dict):
+        strokes = sample_card.get("strokes")
+        if isinstance(strokes, list):
+            for stroke in strokes:
+                if isinstance(stroke, dict) and stroke.get("type") == "SOLID":
+                    color = stroke.get("color")
+                    if isinstance(color, dict):
+                        defaults["border"] = _hex_from_rgb(
+                            _rgb_from_figma_color(color, (37, 49, 71))
+                        )
+                        break
+
+    return {
+        "tokens": defaults,
+        "meta": {
+            "generatedAt": datetime.now().isoformat(timespec="seconds"),
+            "fileKey": get_figma_file_key(),
+            "nodeCount": len(named),
+        },
+    }
+
+
+def save_design_cache(design_payload: dict[str, Any]) -> None:
+    APP_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    FIGMA_DESIGN_CACHE.write_text(json.dumps(design_payload, indent=2), encoding="utf-8")
+
+
+def load_design_cache() -> dict[str, Any] | None:
+    if not FIGMA_DESIGN_CACHE.exists():
+        return None
+    try:
+        return json.loads(FIGMA_DESIGN_CACHE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def get_design_payload() -> dict[str, Any]:
+    try:
+        figma_json = fetch_figma_file()
+        payload = extract_design_tokens(figma_json)
+        save_design_cache(payload)
+        append_figma_sync_log("Design tokens refreshed from live Figma")
+        return payload
+    except Exception as exc:  # noqa: BLE001
+        cached = load_design_cache()
+        if cached is not None:
+            append_figma_sync_log(f"Using cached design tokens due to fetch error: {exc}")
+            return cached
+        return {
+            "tokens": {
+                "background": "#0d1117",
+                "surface": "#0f1624",
+                "surface_alt": "#152033",
+                "text": "#d7dde8",
+                "muted_text": "#9bb2d1",
+                "accent": "#3b82f6",
+                "border": "#253147",
+            },
+            "meta": {
+                "generatedAt": datetime.now().isoformat(timespec="seconds"),
+                "fileKey": "",
+                "nodeCount": 0,
+            },
+        }
+
+
+def build_stylesheet_from_design(design_payload: dict[str, Any]) -> str:
+    tokens = design_payload.get("tokens", {}) if isinstance(design_payload, dict) else {}
+    bg = tokens.get("background", "#0d1117")
+    surface = tokens.get("surface", "#0f1624")
+    surface_alt = tokens.get("surface_alt", "#152033")
+    text = tokens.get("text", "#d7dde8")
+    muted_text = tokens.get("muted_text", "#9bb2d1")
+    accent = tokens.get("accent", "#3b82f6")
+    border = tokens.get("border", "#253147")
+
+    return f"""
+QWidget {{ background: {bg}; color: {text}; }}
+QGroupBox {{
+    border: 1px solid {border};
+    border-radius: 8px;
+    margin-top: 10px;
+    color: {muted_text};
+    font-weight: 600;
+}}
+QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; }}
+QPushButton {{
+    background: {surface_alt};
+    border: 1px solid {border};
+    border-radius: 6px;
+    padding: 6px 10px;
+    color: {text};
+}}
+QPushButton:hover {{ background: {accent}; color: #ffffff; }}
+QTextEdit, QListWidget, QScrollArea {{
+    background: {surface};
+    border: 1px solid {border};
+    border-radius: 6px;
+    color: {text};
+}}
+QLabel {{ color: {text}; }}
+"""
 
 
 def project_contract_path(project_root: Path) -> Path:
@@ -1062,12 +1234,15 @@ class LiveFigmaWindow(QWidget):
 
 
 class MediatorDesktopWindow(QWidget):
-    def __init__(self) -> None:
+    def __init__(self, design_payload: dict[str, Any]) -> None:
         super().__init__()
+        self.design_payload = design_payload
         self.projects: list[str] = load_projects()
         self.arch_window: ArchitectureWindow | None = None
         self.actions_window: ActionsWindow | None = None
         self.figma_window: LiveFigmaWindow | None = None
+
+        self.setStyleSheet(build_stylesheet_from_design(design_payload))
 
         self.setWindowTitle("Mediator Desktop - Multi Project")
         self.resize(920, 680)
@@ -1075,8 +1250,11 @@ class MediatorDesktopWindow(QWidget):
         root_layout = QVBoxLayout()
         self.setLayout(root_layout)
 
+        meta = design_payload.get("meta", {}) if isinstance(design_payload, dict) else {}
+        source_note = "live" if meta.get("nodeCount", 0) else "fallback"
         header = QLabel(
-            "Select a project and open: Architecture, Agents/Actions, or Live Figma (dynamic UI)."
+            "Select a project and open: Architecture, Agents/Actions, or Live Figma (dynamic UI). "
+            f"Design source: {source_note} tokens"
         )
         header.setWordWrap(True)
         header.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
@@ -1112,6 +1290,14 @@ class MediatorDesktopWindow(QWidget):
         root_layout.addWidget(self.status)
 
         self.refresh_project_list()
+        self.auto_open_design_view()
+
+    def auto_open_design_view(self) -> None:
+        if not self.projects:
+            return
+        # Select first saved project by default and open live view so design is visible immediately.
+        self.project_list.setCurrentRow(0)
+        self.open_figma_window()
 
     def refresh_project_list(self) -> None:
         self.project_list.clear()
@@ -1190,7 +1376,8 @@ class MediatorDesktopWindow(QWidget):
 
 def main() -> int:
     app = QApplication(sys.argv)
-    window = MediatorDesktopWindow()
+    design_payload = get_design_payload()
+    window = MediatorDesktopWindow(design_payload)
     window.show()
     return app.exec()
 
