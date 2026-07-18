@@ -9,6 +9,16 @@ import sys
 from pathlib import Path
 
 
+def launch_gui_dashboard() -> str:
+    repo_root = Path(__file__).resolve().parent
+    gui_path = repo_root / "my-ai-framework" / "ui" / "mediator_gui.py"
+    if not gui_path.exists():
+        return f"GUI file not found: {gui_path}"
+
+    process = subprocess.Popen([sys.executable, str(gui_path)], cwd=str(repo_root))
+    return f"Launched multi-project desktop dashboard (PID: {process.pid})"
+
+
 def run_task(task: str) -> str:
     repo_root = Path(__file__).resolve().parent
     bridge_path = repo_root / "mediator_bridge.py"
@@ -72,6 +82,7 @@ def _interactive_loop() -> int:
         print("3) Edit a file")
         print("4) Run custom mediator command")
         print("5) View latest narrative log")
+        print("6) Open multi-project desktop dashboard")
         print("0) Exit")
         print("==============================")
 
@@ -99,6 +110,8 @@ def _interactive_loop() -> int:
             print("\n" + run_task(command) + "\n")
         elif choice == "5":
             print_narrative_log_tail(10)
+        elif choice == "6":
+            print("\n" + launch_gui_dashboard() + "\n")
         elif choice == "0":
             print("Goodbye.")
             break
@@ -112,11 +125,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Mediator Control Center")
     parser.add_argument("task", nargs="*", help="Optional one-shot task to run.")
     parser.add_argument(
+        "--gui",
+        action="store_true",
+        help="Launch the multi-project desktop dashboard.",
+    )
+    parser.add_argument(
         "--no-log-tail",
         action="store_true",
         help="Do not print narrative log tail after one-shot task execution.",
     )
     args = parser.parse_args()
+
+    if args.gui:
+        print(launch_gui_dashboard())
+        return 0
 
     if args.task:
         task = " ".join(args.task).strip()

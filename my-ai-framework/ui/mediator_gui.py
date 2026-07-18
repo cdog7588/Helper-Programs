@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
-"""Figma-driven Mediator desktop UI (PySide6)."""
+"""Multi-project Mediator desktop UI (PySide6)."""
 
 from __future__ import annotations
 
-import os
+import json
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-import requests
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
+    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QTextEdit,
@@ -24,58 +26,97 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from figma_config import get_figma_file_key, get_figma_token  # type: ignore
-else:
-    from .figma_config import get_figma_file_key, get_figma_token
+APP_STATE_DIR = Path.home() / ".mediator_desktop"
+PROJECTS_FILE = APP_STATE_DIR / "projects.json"
 
 
-def fetch_figma_file() -> dict[str, Any]:
-    token = get_figma_token()
-    file_key = get_figma_file_key()
-    if not token or not file_key:
-        raise RuntimeError(
-            "Missing Figma config. Set FIGMA_TOKEN and FIGMA_FILE_KEY environment variables."
+def load_projects() -> list[str]:
+    if not PROJECTS_FILE.exists():
+        return []
+    try:
+        data = json.loads(PROJECTS_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            projects = [str(Path(item).resolve()) for item in data if isinstance(item, str)]
+            # Preserve user order while removing duplicates.
+            deduped: list[str] = []
+            seen = set()
+            for project in projects:
+                if project not in seen:
+                    deduped.append(project)
+                    seen.add(project)
+            return deduped
+    except (OSError, json.JSONDecodeError):
+        pass
+    return []
+
+
+def save_projects(project_paths: list[str]) -> None:
+    APP_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    PROJECTS_FILE.write_text(json.dumps(project_paths, indent=2), encoding="utf-8")
+
+
+def parse_architecture(project_root: Path) -> tuple[str, str]:
+    arch_path = project_root / "architecture-generator" / "architecture.json"
+    if not arch_path.exists():
+        return (
+            "No architecture file found.",
+            f"Expected architecture file at: {arch_path}",
         )
 
-    url = f"https://api.figma.com/v1/files/{file_key}"
-    headers = {"X-Figma-Token": token}
-    response = requests.get(url, headers=headers, timeout=15)
-    response.raise_for_status()
-    return response.json()
+    try:
+        data = json.loads(arch_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return (
+            "Could not parse architecture file.",
+            f"Error reading {arch_path}: {exc}",
+        )
+
+    service = data.get("service", {}) if isinstance(data, dict) else {}
+    controllers = service.get("controllers", []) if isinstance(service, dict) else []
+    services = service.get("services", []) if isinstance(service, dict) else []
+    repositories = service.get("repositories", []) if isinstance(service, dict) else []
+    dtos = service.get("dtos", []) if isinstance(service, dict) else []
+
+    summary_lines = [
+        "Backend Architecture Summary",
+        "============================",
+        f"Project: {project_root}",
+        "",
+        f"controllers: {len(controllers)}",
+        f"services: {len(services)}",
+        f"repositories: {len(repositories)}",
+        f"dtos: {len(dtos)}",
+    ]
+    pretty_json = json.dumps(data, indent=2)
+    return "\n".join(summary_lines), pretty_json
 
 
-def find_named_nodes(figma_json: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    named: dict[str, dict[str, Any]] = {}
-
-    def walk(node: dict[str, Any]) -> None:
-        name = node.get("name")
-        if isinstance(name, str) and name:
-            named[name] = node
-        children = node.get("children", [])
-        if isinstance(children, list):
-            for child in children:
-                if isinstance(child, dict):
-                    walk(child)
-
-    root = figma_json.get("document")
-    if isinstance(root, dict):
-        walk(root)
-    return named
+def detect_agents(project_root: Path) -> list[str]:
+    agents: set[str] = set()
+    for folder in (
+        project_root / ".github" / "agents",
+        project_root / "my-ai-framework" / "agents",
+    ):
+        if not folder.exists():
+            continue
+        for file_path in folder.glob("*.agent.md"):
+            agents.add(file_path.stem.replace(".agent", ""))
+    return sorted(agents)
 
 
-def run_mediator_command(command: str) -> str:
-    repo_root = Path(__file__).resolve().parents[2]
-    bridge_path = repo_root / "mediator_bridge.py"
+def run_mediator_command(project_root: Path, command: str) -> str:
+    bridge_path = project_root / "mediator_bridge.py"
     if not bridge_path.exists():
-        return f"Bridge script not found: {bridge_path}"
+        return (
+            "This project does not have mediator_bridge.py yet.\n"
+            "You can still inspect architecture and agents, but command execution requires mediator runtime files."
+        )
 
     process = subprocess.run(
         [sys.executable, str(bridge_path), command],
         capture_output=True,
         text=True,
-        cwd=str(repo_root),
+        cwd=str(project_root),
     )
     stdout = (process.stdout or "").strip()
     stderr = (process.stderr or "").strip()
@@ -86,131 +127,215 @@ def run_mediator_command(command: str) -> str:
     return f"Mediator command exited with code {process.returncode}"
 
 
-class MediatorWindow(QWidget):
-    def __init__(self, named_nodes: dict[str, dict[str, Any]] | None = None) -> None:
+class ArchitectureWindow(QWidget):
+    def __init__(self, project_root: Path) -> None:
         super().__init__()
-        self.named_nodes = named_nodes or {}
+        self.project_root = project_root
+        self.setWindowTitle(f"Architecture - {project_root.name}")
+        self.resize(980, 740)
 
-        self.setWindowTitle("Mediator Control Center")
-        self.resize(1100, 760)
+        root_layout = QVBoxLayout()
+        self.setLayout(root_layout)
+
+        self.summary = QTextEdit()
+        self.summary.setReadOnly(True)
+
+        self.raw_json = QTextEdit()
+        self.raw_json.setReadOnly(True)
+
+        refresh_btn = QPushButton("Refresh Architecture")
+        refresh_btn.clicked.connect(self.refresh)
+
+        root_layout.addWidget(refresh_btn)
+        root_layout.addWidget(QLabel("Summary"))
+        root_layout.addWidget(self.summary, 1)
+        root_layout.addWidget(QLabel("Raw architecture.json"))
+        root_layout.addWidget(self.raw_json, 3)
+
+        self.refresh()
+
+    def refresh(self) -> None:
+        summary_text, raw_json = parse_architecture(self.project_root)
+        self.summary.setPlainText(summary_text)
+        self.raw_json.setPlainText(raw_json)
+
+
+class ActionsWindow(QWidget):
+    def __init__(self, project_root: Path) -> None:
+        super().__init__()
+        self.project_root = project_root
+        self.setWindowTitle(f"Agents and Actions - {project_root.name}")
+        self.resize(980, 740)
 
         root_layout = QHBoxLayout()
         self.setLayout(root_layout)
 
-        command_box = QGroupBox("Commands")
-        command_layout = QVBoxLayout()
-        command_box.setLayout(command_layout)
+        left_box = QGroupBox("Available Agents")
+        left_layout = QVBoxLayout()
+        left_box.setLayout(left_layout)
 
-        output_box = QGroupBox("Output and Logs")
-        output_layout = QVBoxLayout()
-        output_box.setLayout(output_layout)
+        right_box = QGroupBox("Actions and Output")
+        right_layout = QVBoxLayout()
+        right_box.setLayout(right_layout)
 
-        root_layout.addWidget(command_box, 1)
-        root_layout.addWidget(output_box, 3)
+        root_layout.addWidget(left_box, 1)
+        root_layout.addWidget(right_box, 2)
 
-        self.output_label = QLabel("Run a command to see output.")
-        self.output_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self.output_label.setWordWrap(True)
+        self.agent_list = QListWidget()
+        left_layout.addWidget(self.agent_list)
 
-        self.log_view = QTextEdit()
-        self.log_view.setReadOnly(True)
+        for label, command in (
+            ("Analyze Backend Architecture", "analyze backend architecture"),
+            ("Sync Architecture", "sync architecture"),
+            ("Run Custom Command", "__custom__"),
+        ):
+            btn = QPushButton(label)
+            if command == "__custom__":
+                btn.clicked.connect(self.run_custom_command)
+            else:
+                btn.clicked.connect(lambda _checked=False, c=command: self.run_command(c))
+            right_layout.addWidget(btn)
 
-        output_layout.addWidget(self.output_label)
-        output_layout.addWidget(self.log_view)
+        self.output = QTextEdit()
+        self.output.setReadOnly(True)
+        right_layout.addWidget(self.output, 1)
 
-        self.build_buttons(command_layout)
-        self.refresh_log_tail()
+        self.refresh_agents()
 
-    def build_buttons(self, layout: QVBoxLayout) -> None:
-        has = self.named_nodes.__contains__
-
-        if has("btn_analyze") or not self.named_nodes:
-            btn = QPushButton("Analyze backend architecture")
-            btn.clicked.connect(lambda: self.run_command("analyze backend architecture"))
-            layout.addWidget(btn)
-
-        if has("btn_sync") or not self.named_nodes:
-            btn = QPushButton("Sync architecture")
-            btn.clicked.connect(lambda: self.run_command("sync architecture"))
-            layout.addWidget(btn)
-
-        if has("btn_edit") or not self.named_nodes:
-            btn = QPushButton("Edit file")
-            btn.clicked.connect(self.run_edit_command)
-            layout.addWidget(btn)
-
-        if has("btn_custom") or not self.named_nodes:
-            btn = QPushButton("Run custom command")
-            btn.clicked.connect(self.run_custom_command)
-            layout.addWidget(btn)
-
-        refresh = QPushButton("Refresh narrative log")
-        refresh.clicked.connect(self.refresh_log_tail)
-        layout.addWidget(refresh)
-
-        layout.addStretch(1)
+    def refresh_agents(self) -> None:
+        self.agent_list.clear()
+        for name in detect_agents(self.project_root):
+            self.agent_list.addItem(QListWidgetItem(name))
+        if self.agent_list.count() == 0:
+            self.agent_list.addItem(QListWidgetItem("No agent definitions found in this project."))
 
     def run_command(self, command: str) -> None:
-        result = run_mediator_command(command)
-        self.output_label.setText(f"Command: {command}\n\nResult:\n{result}")
-        self.refresh_log_tail()
+        result = run_mediator_command(self.project_root, command)
+        self.output.setPlainText(f"Project: {self.project_root}\n\nCommand: {command}\n\nResult:\n{result}")
+        self.refresh_agents()
 
     def run_custom_command(self) -> None:
-        command, ok = QInputDialog.getText(self, "Mediator Command", "Enter mediator command:")
+        command, ok = QInputDialog.getText(self, "Custom Mediator Command", "Enter command:")
         if ok and command.strip():
             self.run_command(command.strip())
 
-    def run_edit_command(self) -> None:
-        file_path, ok_path = QInputDialog.getText(self, "Edit Command", "File path:")
-        if not ok_path or not file_path.strip():
+
+class MediatorDesktopWindow(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.projects: list[str] = load_projects()
+        self.arch_window: ArchitectureWindow | None = None
+        self.actions_window: ActionsWindow | None = None
+
+        self.setWindowTitle("Mediator Desktop - Multi Project")
+        self.resize(900, 640)
+
+        root_layout = QVBoxLayout()
+        self.setLayout(root_layout)
+
+        header = QLabel(
+            "Open any project folder. Then launch Architecture and Agents windows for that project."
+        )
+        header.setWordWrap(True)
+        header.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        root_layout.addWidget(header)
+
+        self.project_list = QListWidget()
+        root_layout.addWidget(self.project_list, 1)
+
+        button_row = QHBoxLayout()
+        root_layout.addLayout(button_row)
+
+        add_btn = QPushButton("Add Project Folder")
+        add_btn.clicked.connect(self.add_project)
+        button_row.addWidget(add_btn)
+
+        remove_btn = QPushButton("Remove Selected")
+        remove_btn.clicked.connect(self.remove_selected_project)
+        button_row.addWidget(remove_btn)
+
+        open_arch_btn = QPushButton("Open Architecture Window")
+        open_arch_btn.clicked.connect(self.open_architecture_window)
+        button_row.addWidget(open_arch_btn)
+
+        open_actions_btn = QPushButton("Open Agents and Actions Window")
+        open_actions_btn.clicked.connect(self.open_actions_window)
+        button_row.addWidget(open_actions_btn)
+
+        self.status = QLabel("")
+        root_layout.addWidget(self.status)
+
+        self.refresh_project_list()
+
+    def refresh_project_list(self) -> None:
+        self.project_list.clear()
+        for project in self.projects:
+            self.project_list.addItem(QListWidgetItem(project))
+
+        if self.projects:
+            self.status.setText(f"Saved projects: {len(self.projects)}")
+        else:
+            self.status.setText("No projects saved yet.")
+
+    def selected_project_root(self) -> Path | None:
+        current = self.project_list.currentItem()
+        if current is None:
+            QMessageBox.information(self, "Select a project", "Please select a project first.")
+            return None
+        return Path(current.text())
+
+    def add_project(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "Choose project folder")
+        if not folder:
             return
 
-        old_text, ok_old = QInputDialog.getText(self, "Edit Command", "Old text:")
-        if not ok_old:
+        resolved = str(Path(folder).resolve())
+        if resolved not in self.projects:
+            self.projects.append(resolved)
+            save_projects(self.projects)
+            self.refresh_project_list()
+        else:
+            QMessageBox.information(self, "Already added", "That project is already in the list.")
+
+    def remove_selected_project(self) -> None:
+        current = self.project_list.currentItem()
+        if current is None:
+            QMessageBox.information(self, "Nothing selected", "Select a project to remove.")
             return
 
-        new_text, ok_new = QInputDialog.getText(self, "Edit Command", "New text:")
-        if not ok_new:
+        value = current.text()
+        self.projects = [item for item in self.projects if item != value]
+        save_projects(self.projects)
+        self.refresh_project_list()
+
+    def open_architecture_window(self) -> None:
+        project_root = self.selected_project_root()
+        if project_root is None:
             return
 
-        command = f"edit|{file_path.strip()}|{old_text}|{new_text}"
-        self.run_command(command)
-
-    def refresh_log_tail(self) -> None:
-        repo_root = Path(__file__).resolve().parents[2]
-        narrative_log = repo_root / "my-ai-framework" / "logs" / "change_explanations.txt"
-        if not narrative_log.exists():
-            self.log_view.setPlainText("No narrative log found yet.")
+        if not project_root.exists():
+            QMessageBox.warning(self, "Missing folder", f"Project folder not found: {project_root}")
             return
 
-        try:
-            lines = narrative_log.read_text(encoding="utf-8").splitlines()
-            tail = lines[-40:]
-            self.log_view.setPlainText("\n".join(tail) if tail else "Narrative log is empty.")
-        except OSError as exc:
-            self.log_view.setPlainText(f"Could not read narrative log: {exc}")
+        self.arch_window = ArchitectureWindow(project_root)
+        self.arch_window.show()
+
+    def open_actions_window(self) -> None:
+        project_root = self.selected_project_root()
+        if project_root is None:
+            return
+
+        if not project_root.exists():
+            QMessageBox.warning(self, "Missing folder", f"Project folder not found: {project_root}")
+            return
+
+        self.actions_window = ActionsWindow(project_root)
+        self.actions_window.show()
 
 
 def main() -> int:
-    figma_nodes: dict[str, dict[str, Any]] = {}
-    figma_warning = ""
-
-    try:
-        figma_json = fetch_figma_file()
-        figma_nodes = find_named_nodes(figma_json)
-    except Exception as exc:  # noqa: BLE001
-        figma_warning = str(exc)
-
     app = QApplication(sys.argv)
-    window = MediatorWindow(figma_nodes)
-    if figma_warning:
-        QMessageBox.information(
-            window,
-            "Figma Config Notice",
-            "Running with default menu because Figma could not be loaded.\n\n"
-            + figma_warning
-            + "\n\nSet FIGMA_TOKEN and FIGMA_FILE_KEY to enable dynamic mapping.",
-        )
+    window = MediatorDesktopWindow()
     window.show()
     return app.exec()
 
