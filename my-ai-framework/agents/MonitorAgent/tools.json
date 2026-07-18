@@ -1,0 +1,8 @@
+{
+  "allowed": [
+    "read",
+    "edit",
+    "search",
+    "execute"
+  ]
+}

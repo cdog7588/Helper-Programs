@@ -1,0 +1,8 @@
+{
+  "name": "SyncAgent",
+  "description": "Compares architecture artifacts and coordinates mismatch fixes.",
+  "argumentHint": "",
+  "userInvocable": true,
+  "toolsFile": "./tools.json",
+  "promptFile": "./prompt.md"
+}

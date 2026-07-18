@@ -1,0 +1,8 @@
+package com.app.dtos;
+
+public class {{ name }} {
+
+    {% for field, type in fields.items() %}
+    private {{ type }} {{ field }};
+    {% endfor %}
+}

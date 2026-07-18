@@ -1,0 +1,8 @@
+{
+  "name": "GeneratorAgent",
+  "description": "Use when generating or updating backend code from architecture.json, including controllers, services, DTOs, repositories, or related backend files.",
+  "argumentHint": "A code generation task or architecture section.",
+  "userInvocable": true,
+  "toolsFile": "./tools.json",
+  "promptFile": "./prompt.md"
+}

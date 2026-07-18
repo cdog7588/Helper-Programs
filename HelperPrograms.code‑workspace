@@ -1,0 +1,23 @@
+{
+  "folders": [
+    { "path": "architecture-generator" },
+    { "path": ".github/agents" }
+  ],
+  "settings": {
+    "aiFramework.agents": [
+      { "name": "MediatorAI", "path": ".github/agents/MediatorAI.agent.md" },
+      { "name": "GeneratorAgent", "path": ".github/agents/GeneratorAgent.agent.md" },
+      { "name": "AnalyzerAgent", "path": ".github/agents/AnalyzerAgent.agent.md" },
+      { "name": "ArchitectureAgent", "path": ".github/agents/ArchitectureAgent.agent.md" },
+      { "name": "SyncAgent", "path": ".github/agents/SyncAgent.agent.md" },
+      { "name": "FileManagerAgent", "path": ".github/agents/FileManagerAgent.agent.md" },
+      { "name": "ValidatorAgent", "path": ".github/agents/ValidatorAgent.agent.md" },
+      { "name": "DocumentationAgent", "path": ".github/agents/DocumentationAgent.agent.md" },
+      { "name": "TestAgent", "path": ".github/agents/TestAgent.agent.md" },
+      { "name": "DeploymentAgent", "path": ".github/agents/DeploymentAgent.agent.md" },
+      { "name": "MonitorAgent", "path": ".github/agents/MonitorAgent.agent.md" },
+      { "name": "CodeAuditAgent", "path": ".github/agents/CodeAuditAgent.agent.md" },
+      { "name": "ResourceMonitorAgent", "path": ".github/agents/ResourceMonitorAgent.agent.md" }
+    ]
+  }
+}

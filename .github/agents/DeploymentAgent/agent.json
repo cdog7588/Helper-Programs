@@ -1,0 +1,8 @@
+{
+  "name": "DeploymentAgent",
+  "description": "Use when preparing releases, deployment checklists, and environment-specific rollout steps.",
+  "argumentHint": "",
+  "userInvocable": true,
+  "toolsFile": "./tools.json",
+  "promptFile": "./prompt.md"
+}

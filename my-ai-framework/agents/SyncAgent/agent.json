@@ -1,0 +1,8 @@
+{
+  "name": "SyncAgent",
+  "description": "Use when comparing architecture.json with backend-architecture.json, finding mismatches, and coordinating fixes to keep them aligned.",
+  "argumentHint": "A sync or alignment request.",
+  "userInvocable": true,
+  "toolsFile": "./tools.json",
+  "promptFile": "./prompt.md"
+}

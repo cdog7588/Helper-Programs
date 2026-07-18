@@ -1,0 +1,8 @@
+{
+  "name": "ResourceMonitorAgent",
+  "description": "Tracks VS Code resource usage, credit consumption, and agent performance metrics.",
+  "argumentHint": "A resource usage or performance monitoring request.",
+  "userInvocable": true,
+  "toolsFile": "./tools.json",
+  "promptFile": "./prompt.md"
+}

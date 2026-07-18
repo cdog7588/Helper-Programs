@@ -1,0 +1,44 @@
+name: Build Mediator App
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - mediator_app.py
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build executable
+        run: pyinstaller --onefile mediator_app.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MediatorApp
+          path: dist/mediator_app.exe
+
+      - name: Auto-link MediatorApp to projects
+        shell: cmd
+        run: |
+          if not exist "C:\dev" (
+            echo C:\dev not found on this runner. Skipping auto-link.
+            exit /b 0
+          )
+          for /d %%P in ("C:\dev\*") do (
+            if not exist "%%P\tools" mkdir "%%P\tools"
+            copy /Y "dist\mediator_app.exe" "%%P\tools\mediator_app.exe"
+            echo Linked MediatorApp to %%P\tools
+          )

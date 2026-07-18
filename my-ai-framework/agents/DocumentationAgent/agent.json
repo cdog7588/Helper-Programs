@@ -1,0 +1,8 @@
+{
+  "name": "DocumentationAgent",
+  "description": "Use when writing or updating technical documentation, runbooks, architecture notes, and usage guides.",
+  "argumentHint": "A documentation task or documentation update request.",
+  "userInvocable": true,
+  "toolsFile": "./tools.json",
+  "promptFile": "./prompt.md"
+}

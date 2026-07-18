@@ -1,0 +1,8 @@
+{
+  "name": "AnalyzerAgent",
+  "description": "Use when scanning backend code to extract structure and produce backend-architecture.json or a backend architecture summary.",
+  "argumentHint": "A backend scanning or analysis request.",
+  "userInvocable": true,
+  "toolsFile": "./tools.json",
+  "promptFile": "./prompt.md"
+}

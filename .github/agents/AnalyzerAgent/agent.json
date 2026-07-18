@@ -1,0 +1,8 @@
+{
+  "name": "AnalyzerAgent",
+  "description": "Analyzes backend code structure and architecture alignment.",
+  "argumentHint": "",
+  "userInvocable": true,
+  "toolsFile": "./tools.json",
+  "promptFile": "./prompt.md"
+}

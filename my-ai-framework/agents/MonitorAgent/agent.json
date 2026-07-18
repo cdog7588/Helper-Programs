@@ -1,0 +1,8 @@
+{
+  "name": "MonitorAgent",
+  "description": "Use when defining monitoring checks, runtime health validation, and post-deploy observability workflows.",
+  "argumentHint": "A monitoring or operational visibility task.",
+  "userInvocable": true,
+  "toolsFile": "./tools.json",
+  "promptFile": "./prompt.md"
+}

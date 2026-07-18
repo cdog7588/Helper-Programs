@@ -1,0 +1,8 @@
+{
+  "name": "ArchitectureAgent",
+  "description": "Updates architecture models, endpoints, and structural metadata.",
+  "argumentHint": "",
+  "userInvocable": true,
+  "toolsFile": "./tools.json",
+  "promptFile": "./prompt.md"
+}

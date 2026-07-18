@@ -1,0 +1,8 @@
+{
+  "name": "GeneratorAgent",
+  "description": "Generates backend code from architecture definitions.",
+  "argumentHint": "",
+  "userInvocable": true,
+  "toolsFile": "./tools.json",
+  "promptFile": "./prompt.md"
+}

@@ -1,0 +1,8 @@
+{
+  "name": "MediatorAI",
+  "description": "Use when routing a user request to the correct workspace agent for code generation, architecture edits, backend analysis, architecture and backend sync, testing, docs, validation, deployment, and monitoring tasks.",
+  "argumentHint": "A high-level task to coordinate.",
+  "userInvocable": true,
+  "toolsFile": "./tools.json",
+  "promptFile": "./prompt.md"
+}

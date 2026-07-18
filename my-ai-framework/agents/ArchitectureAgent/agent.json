@@ -1,0 +1,8 @@
+{
+  "name": "ArchitectureAgent",
+  "description": "Use when editing architecture.json to add or update models, fields, relationships, endpoints, or service structure.",
+  "argumentHint": "An architecture update or structural change.",
+  "userInvocable": true,
+  "toolsFile": "./tools.json",
+  "promptFile": "./prompt.md"
+}

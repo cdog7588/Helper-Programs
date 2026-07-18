@@ -1,0 +1,6 @@
+MediatorAI Architecture Analysis
+==============================
+controllers: 1
+services: 1
+repositories: 1
+dtos: 1

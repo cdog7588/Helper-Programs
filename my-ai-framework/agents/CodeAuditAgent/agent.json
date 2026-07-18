@@ -1,0 +1,8 @@
+{
+  "name": "CodeAuditAgent",
+  "description": "Detects dead code, duplicate logic, import hazards, and maintenance risks in scripts.",
+  "argumentHint": "A file or folder path to audit.",
+  "userInvocable": true,
+  "toolsFile": "./tools.json",
+  "promptFile": "./prompt.md"
+}

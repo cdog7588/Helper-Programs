@@ -1,0 +1,8 @@
+{
+  "name": "TestAgent",
+  "description": "Use when creating, updating, and running tests for generated code and integration workflows.",
+  "argumentHint": "A testing task or test coverage request.",
+  "userInvocable": true,
+  "toolsFile": "./tools.json",
+  "promptFile": "./prompt.md"
+}

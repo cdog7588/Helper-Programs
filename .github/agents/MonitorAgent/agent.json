@@ -1,0 +1,8 @@
+{
+  "name": "MonitorAgent",
+  "description": "Defines monitoring checks and observability workflows.",
+  "argumentHint": "",
+  "userInvocable": true,
+  "toolsFile": "./tools.json",
+  "promptFile": "./prompt.md"
+}

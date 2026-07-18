@@ -1,0 +1,43 @@
+{
+  "service": {
+    "name": "Offline",
+    "controllers": [
+      {
+        "name": "OfflineController",
+        "endpoints": [
+          {
+            "method": "GET",
+            "path": "/offline/{userId}",
+            "returns": "OfflineDTO"
+          }
+        ]
+      }
+    ],
+    "services": [
+      {
+        "name": "OfflineService",
+        "methods": [
+          {
+            "name": "getOfflineData",
+            "returns": "OfflineDTO"
+          }
+        ]
+      }
+    ],
+    "repositories": [
+      {
+        "name": "OfflineRepository",
+        "entity": "OfflineEntity"
+      }
+    ],
+    "dtos": [
+      {
+        "name": "OfflineDTO",
+        "fields": {
+          "userId": "Long",
+          "status": "String"
+        }
+      }
+    ]
+  }
+}

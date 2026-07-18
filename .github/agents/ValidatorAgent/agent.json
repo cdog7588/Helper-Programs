@@ -1,0 +1,8 @@
+{
+  "name": "ValidatorAgent",
+  "description": "Validates schema, generated outputs, and conventions.",
+  "argumentHint": "",
+  "userInvocable": true,
+  "toolsFile": "./tools.json",
+  "promptFile": "./prompt.md"
+}

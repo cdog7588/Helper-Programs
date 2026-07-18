@@ -1,0 +1,27 @@
+package com.app.controllers;
+
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+public class {{ name }} {
+
+    {% for ep in endpoints %}
+    {% set method = ep.method|upper %}
+    {% if method == "GET" %}
+    @GetMapping("{{ ep.path }}")
+    {% elif method == "POST" %}
+    @PostMapping("{{ ep.path }}")
+    {% elif method == "PUT" %}
+    @PutMapping("{{ ep.path }}")
+    {% elif method == "DELETE" %}
+    @DeleteMapping("{{ ep.path }}")
+    {% elif method == "PATCH" %}
+    @PatchMapping("{{ ep.path }}")
+    {% else %}
+    @RequestMapping(value = "{{ ep.path }}", method = RequestMethod.{{ method }})
+    {% endif %}
+    public {{ ep.returns }} handle() {
+        return null;
+    }
+    {% endfor %}
+}

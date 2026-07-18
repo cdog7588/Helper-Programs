@@ -1,0 +1,8 @@
+{
+  "name": "ValidatorAgent",
+  "description": "Use when validating architecture, generated code outputs, and agent metadata for consistency and correctness.",
+  "argumentHint": "A validation or quality-check request.",
+  "userInvocable": true,
+  "toolsFile": "./tools.json",
+  "promptFile": "./prompt.md"
+}

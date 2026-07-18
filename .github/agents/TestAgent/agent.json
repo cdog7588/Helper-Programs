@@ -1,0 +1,8 @@
+{
+  "name": "TestAgent",
+  "description": "Creates and runs tests for generated and maintained code.",
+  "argumentHint": "",
+  "userInvocable": true,
+  "toolsFile": "./tools.json",
+  "promptFile": "./prompt.md"
+}

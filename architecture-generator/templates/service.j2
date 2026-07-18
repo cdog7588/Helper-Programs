@@ -1,0 +1,13 @@
+package com.app.services;
+
+import org.springframework.stereotype.Service;
+
+@Service
+public class {{ name }} {
+
+    {% for m in methods %}
+    public {{ m.returns }} {{ m.name }}() {
+        return null;
+    }
+    {% endfor %}
+}

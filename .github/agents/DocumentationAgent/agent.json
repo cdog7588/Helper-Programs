@@ -1,0 +1,8 @@
+{
+  "name": "DocumentationAgent",
+  "description": "Maintains technical docs, guides, and runbooks.",
+  "argumentHint": "",
+  "userInvocable": true,
+  "toolsFile": "./tools.json",
+  "promptFile": "./prompt.md"
+}
