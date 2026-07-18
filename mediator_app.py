@@ -44,26 +44,66 @@ def print_latest_narrative_lines(line_count: int = 8) -> None:
         pass
 
 
-def _interactive_loop() -> int:
-    print("=== Mediator Control Center ===")
-    print("Type a command (analyze, sync, edit, deploy) or 'exit' to quit.\n")
+def print_narrative_log_tail(line_count: int = 10) -> None:
+    log_path = Path(__file__).resolve().parent / "my-ai-framework" / "logs" / "change_explanations.txt"
+    if not log_path.exists():
+        print("No narrative log found.")
+        return
 
+    print("\n--- Latest Narrative Log ---")
+    try:
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        tail = lines[-line_count:]
+        if tail:
+            print("\n".join(tail))
+        else:
+            print("(Narrative log is empty)")
+    except OSError as exc:
+        print(f"Could not read narrative log: {exc}")
+
+
+def _interactive_loop() -> int:
     while True:
+        print("\n==============================")
+        print("      Mediator Control Center")
+        print("==============================")
+        print("1) Analyze backend architecture")
+        print("2) Sync architecture")
+        print("3) Edit a file")
+        print("4) Run custom mediator command")
+        print("5) View latest narrative log")
+        print("0) Exit")
+        print("==============================")
+
         try:
-            task = input("Mediator> ").strip()
+            choice = input("Select an option: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\nGoodbye.")
             break
 
-        if task.lower() in {"exit", "quit"}:
+        if choice == "1":
+            print("\n" + run_task("analyze backend architecture") + "\n")
+        elif choice == "2":
+            print("\n" + run_task("sync architecture") + "\n")
+        elif choice == "3":
+            path = input("File path: ").strip()
+            old = input("Old text: ").strip()
+            new = input("New text: ").strip()
+            command = f"edit|{path}|{old}|{new}"
+            print("\n" + run_task(command) + "\n")
+        elif choice == "4":
+            command = input("Mediator command: ").strip()
+            if not command:
+                print("No command entered.")
+                continue
+            print("\n" + run_task(command) + "\n")
+        elif choice == "5":
+            print_narrative_log_tail(10)
+        elif choice == "0":
             print("Goodbye.")
             break
-        if not task:
-            continue
-
-        result = run_task(task)
-        print("\nResult:\n" + result + "\n")
-        print_latest_narrative_lines()
+        else:
+            print("Invalid selection.")
 
     return 0
 
@@ -85,7 +125,7 @@ def main() -> int:
         result = run_task(task)
         print(result)
         if not args.no_log_tail:
-            print_latest_narrative_lines()
+            print_narrative_log_tail(5)
         return 0
 
     return _interactive_loop()
