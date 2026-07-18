@@ -620,6 +620,7 @@ class LiveFigmaWindow(QWidget):
         super().__init__()
         self.project_root = project_root
         self.figma_document: dict[str, Any] | None = None
+        self.render_root: dict[str, Any] | None = None
         self.named_nodes: dict[str, dict[str, Any]] = {}
         self.grouped_nodes: dict[str, list[str]] = {}
         self.pixel_layout_mode = True
@@ -797,11 +798,29 @@ class LiveFigmaWindow(QWidget):
                 continue
             if fill.get("visible") is False:
                 continue
-            if fill.get("type") != "SOLID":
-                continue
-            color = fill.get("color")
-            if isinstance(color, dict):
-                return self._rgba_css(color, fill.get("opacity"))
+            fill_type = fill.get("type")
+            if fill_type == "SOLID":
+                color = fill.get("color")
+                if isinstance(color, dict):
+                    return self._rgba_css(color, fill.get("opacity"))
+            if fill_type == "GRADIENT_LINEAR":
+                stops = fill.get("gradientStops")
+                if isinstance(stops, list) and stops:
+                    parts: list[str] = []
+                    for stop in stops:
+                        if not isinstance(stop, dict):
+                            continue
+                        color = stop.get("color")
+                        if not isinstance(color, dict):
+                            continue
+                        pos = stop.get("position", 0.0)
+                        try:
+                            pos_pct = max(0.0, min(1.0, float(pos))) * 100
+                        except (TypeError, ValueError):
+                            pos_pct = 0.0
+                        parts.append(f"stop:{pos_pct:.1f}% {self._rgba_css(color, fill.get('opacity'))}")
+                    if parts:
+                        return f"qlineargradient(x1:0, y1:0, x2:1, y2:1, {', '.join(parts)})"
         return fallback
 
     def _stroke_css(self, node: dict[str, Any], fallback: str = "transparent") -> tuple[float, str]:
@@ -840,6 +859,38 @@ class LiveFigmaWindow(QWidget):
                 if isinstance(child, dict):
                     items.extend(self._iter_figma_nodes(child))
         return items
+
+    def _select_best_render_root(self) -> dict[str, Any] | None:
+        if not isinstance(self.figma_document, dict):
+            return None
+
+        interest_prefixes = ("panel_", "btn_", "card_", "status_", "input_", "log_", "meta_", "tab_")
+        candidates: list[tuple[int, float, dict[str, Any]]] = []
+
+        for node in self._iter_figma_nodes(self.figma_document):
+            node_type = str(node.get("type", ""))
+            if node_type not in {"FRAME", "COMPONENT", "INSTANCE", "GROUP", "SECTION"}:
+                continue
+            bounds = self._node_bounds(node)
+            if bounds is None:
+                continue
+            descendants = self._iter_figma_nodes(node)
+            score = 0
+            for item in descendants:
+                item_name = item.get("name")
+                if isinstance(item_name, str) and item_name.lower().startswith(interest_prefixes):
+                    score += 1
+            if score <= 0:
+                continue
+            area = bounds[2] * bounds[3]
+            candidates.append((score, area, node))
+
+        if not candidates:
+            return self.figma_document
+
+        # Prioritize high semantic score; tie-break by larger frame area.
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return candidates[0][2]
 
     def _dynamic_text_for_node(self, node_name: str, fallback: str) -> str:
         key = node_name.lower()
@@ -1079,8 +1130,10 @@ class LiveFigmaWindow(QWidget):
         if not isinstance(self.figma_document, dict):
             return False
 
+        root_node = self.render_root if isinstance(self.render_root, dict) else self.figma_document
+
         visual_nodes: list[tuple[str, dict[str, Any], tuple[float, float, float, float]]] = []
-        for node in self._iter_figma_nodes(self.figma_document):
+        for node in self._iter_figma_nodes(root_node):
             bounds = self._node_bounds(node)
             if bounds is None:
                 continue
@@ -1102,19 +1155,28 @@ class LiveFigmaWindow(QWidget):
         max_x = max(bounds[0] + bounds[2] for _, _, bounds in visual_nodes)
         max_y = max(bounds[1] + bounds[3] for _, _, bounds in visual_nodes)
 
+        base_width = max_x - min_x + 24
+        base_height = max_y - min_y + 24
+        viewport = self.scroll.viewport().size()
+        available_w = max(320, viewport.width() - 20)
+        available_h = max(240, viewport.height() - 20)
+        sx = available_w / max(base_width, 1)
+        sy = available_h / max(base_height, 1)
+        scale = max(0.35, min(2.0, min(sx, sy)))
+
         canvas = QWidget()
-        canvas_width = int(max_x - min_x + 32)
-        canvas_height = int(max_y - min_y + 32)
+        canvas_width = int(base_width * scale) + 16
+        canvas_height = int(base_height * scale) + 16
         canvas.setMinimumSize(max(canvas_width, 480), max(canvas_height, 320))
         canvas.setStyleSheet("background: #0c111a; border: 1px solid #1f2a3d; border-radius: 8px;")
 
         for name, node, rect in sorted(visual_nodes, key=lambda item: item[2][2] * item[2][3], reverse=True):
             node_type = str(node.get("type", ""))
             x, y, w, h = rect
-            rel_x = int(x - min_x + 12)
-            rel_y = int(y - min_y + 12)
-            width = max(int(w), 2)
-            height = max(int(h), 2)
+            rel_x = int((x - min_x + 12) * scale)
+            rel_y = int((y - min_y + 12) * scale)
+            width = max(int(w * scale), 2)
+            height = max(int(h * scale), 2)
 
             lowered = name.lower()
             if lowered.startswith("btn_"):
@@ -1150,8 +1212,10 @@ class LiveFigmaWindow(QWidget):
                 style = node.get("style", {}) if isinstance(node.get("style"), dict) else {}
                 font_size = style.get("fontSize", 12)
                 font_weight = style.get("fontWeight", 400)
+                font_family = style.get("fontFamily", "Segoe UI")
+                text_align_h = str(style.get("textAlignHorizontal", "LEFT")).upper()
                 try:
-                    font_size_num = max(8.0, float(font_size))
+                    font_size_num = max(7.0, float(font_size) * scale)
                 except (TypeError, ValueError):
                     font_size_num = 12.0
                 try:
@@ -1159,18 +1223,29 @@ class LiveFigmaWindow(QWidget):
                 except (TypeError, ValueError):
                     font_weight_num = 400
                 text_color = self._solid_fill_css(node, "#d7dde8")
+                align_css = "left"
+                if text_align_h == "CENTER":
+                    align_css = "center"
+                elif text_align_h == "RIGHT":
+                    align_css = "right"
                 label.setStyleSheet(
-                    f"QLabel {{ background: transparent; color: {text_color}; font-size: {font_size_num:.1f}px; font-weight: {font_weight_num}; }}"
+                    f"QLabel {{ background: transparent; color: {text_color}; font-size: {font_size_num:.1f}px; font-weight: {font_weight_num}; font-family: '{font_family}'; qproperty-alignment: AlignVCenter; }}"
                 )
+                if align_css == "center":
+                    label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+                elif align_css == "right":
+                    label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                else:
+                    label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 continue
 
             block = QWidget(canvas)
             block.setGeometry(rel_x, rel_y, width, height)
             fill = self._solid_fill_css(node, "transparent")
             stroke_w, stroke_color = self._stroke_css(node, "transparent")
-            radius = self._corner_radius(node)
+            radius = self._corner_radius(node) * scale
             block.setStyleSheet(
-                f"QWidget {{ background: {fill}; border: {stroke_w:.1f}px solid {stroke_color}; border-radius: {radius:.1f}px; }}"
+                f"QWidget {{ background: {fill}; border: {max(stroke_w * scale, 0.0):.1f}px solid {stroke_color}; border-radius: {radius:.1f}px; }}"
             )
 
             if lowered.startswith("input_"):
@@ -1183,7 +1258,8 @@ class LiveFigmaWindow(QWidget):
                 value.setStyleSheet("QLabel { background: transparent; color: #d7dde8; font-weight: 600; }")
 
         self.dynamic_layout.addWidget(canvas)
-        self.add_activity("Rendered in pixel layout mode using full Figma frame geometry")
+        root_name = str(root_node.get("name", "document"))
+        self.add_activity(f"Rendered in pixel layout mode using frame '{root_name}' at {scale:.2f}x")
         return True
 
     def _add_dynamic_button(self, layout: QHBoxLayout | QVBoxLayout, button_name: str) -> None:
@@ -1328,6 +1404,7 @@ class LiveFigmaWindow(QWidget):
             document = figma_json.get("document")
             if isinstance(document, dict):
                 self.figma_document = document
+                self.render_root = self._select_best_render_root()
             self.named_nodes = figma_named_nodes(figma_json)
             self.grouped_nodes = categorize_named_nodes(self.named_nodes)
             update_figma_constants(self.grouped_nodes)
