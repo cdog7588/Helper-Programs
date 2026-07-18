@@ -532,6 +532,52 @@ class LiveFigmaWindow(QWidget):
 
         self.reload_from_figma()
 
+    def _node_label(self, name: str, prefix: str) -> str:
+        return name.replace(prefix, "", 1).replace("_", " ").title()
+
+    def _collect_descendants_with_prefix(self, node: dict[str, Any], prefix: str) -> list[str]:
+        found: list[str] = []
+
+        def walk(current: dict[str, Any]) -> None:
+            node_name = current.get("name")
+            if isinstance(node_name, str) and node_name.lower().startswith(prefix.lower()):
+                found.append(node_name)
+            children = current.get("children")
+            if isinstance(children, list):
+                for child in children:
+                    if isinstance(child, dict):
+                        walk(child)
+
+        walk(node)
+        deduped: list[str] = []
+        seen = set()
+        for item in found:
+            if item not in seen:
+                deduped.append(item)
+                seen.add(item)
+        return deduped
+
+    def _accent_color_for_node(self, node: dict[str, Any]) -> str:
+        fills = node.get("fills")
+        if not isinstance(fills, list):
+            return "#2a3445"
+        for fill in fills:
+            if not isinstance(fill, dict):
+                continue
+            if fill.get("type") != "SOLID":
+                continue
+            color = fill.get("color")
+            if not isinstance(color, dict):
+                continue
+            try:
+                r = int(float(color.get("r", 0.16)) * 255)
+                g = int(float(color.get("g", 0.20)) * 255)
+                b = int(float(color.get("b", 0.27)) * 255)
+                return f"#{r:02x}{g:02x}{b:02x}"
+            except (TypeError, ValueError):
+                continue
+        return "#2a3445"
+
     def add_activity(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
@@ -598,17 +644,58 @@ class LiveFigmaWindow(QWidget):
             self.dynamic_layout.addWidget(tabs_box)
 
         for panel_name in panel_names:
+            panel_node = self.named_nodes.get(panel_name, {})
             group = QGroupBox(panel_name.replace("panel_", "").replace("_", " ").title())
+            accent = self._accent_color_for_node(panel_node if isinstance(panel_node, dict) else {})
+            group.setStyleSheet(
+                "QGroupBox { border: 1px solid "
+                + accent
+                + "; border-radius: 8px; margin-top: 10px; font-weight: 600; color: #d7e7ff; }"
+                + "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }"
+            )
+
             group_layout = QVBoxLayout()
             group.setLayout(group_layout)
 
-            group_layout.addWidget(QLabel(f"Source node: {panel_name}"))
+            header = QLabel(f"Source node: {panel_name}")
+            header.setStyleSheet("color: #9bb2d1;")
+            group_layout.addWidget(header)
 
-            # Place matching buttons inside the panel by prefix convention, e.g. panel_agents + btn_agents_sync
-            panel_key = panel_name.lower().replace("panel_", "")
-            linked = [name for name in button_names if panel_key in name.lower()]
-            for button_name in linked:
-                self._add_dynamic_button(group_layout, button_name)
+            descendant_cards: list[str] = []
+            descendant_buttons: list[str] = []
+            if isinstance(panel_node, dict):
+                descendant_cards = self._collect_descendants_with_prefix(panel_node, "card_")
+                descendant_buttons = self._collect_descendants_with_prefix(panel_node, "btn_")
+
+            if descendant_cards:
+                cards_row = QHBoxLayout()
+                for card_name in descendant_cards:
+                    card = QGroupBox(self._node_label(card_name, "card_"))
+                    card.setStyleSheet("QGroupBox { border:1px solid #33445f; border-radius:6px; }")
+                    card_layout = QVBoxLayout()
+                    card_layout.addWidget(QLabel(card_name))
+                    card.setLayout(card_layout)
+                    cards_row.addWidget(card)
+                cards_row.addStretch(1)
+                group_layout.addLayout(cards_row)
+
+            if descendant_buttons:
+                button_row = QHBoxLayout()
+                for button_name in descendant_buttons:
+                    self._add_dynamic_button(button_row, button_name)
+                button_row.addStretch(1)
+                group_layout.addLayout(button_row)
+
+            # Fallback when panels do not contain explicit child button/card nodes.
+            if not descendant_buttons and not descendant_cards:
+                panel_key = panel_name.lower().replace("panel_", "")
+                linked = [name for name in button_names if panel_key in name.lower()]
+                if linked:
+                    fallback_row = QHBoxLayout()
+                    for button_name in linked:
+                        self._add_dynamic_button(fallback_row, button_name)
+                    fallback_row.addStretch(1)
+                    group_layout.addLayout(fallback_row)
 
             self.dynamic_layout.addWidget(group)
 
@@ -656,9 +743,10 @@ class LiveFigmaWindow(QWidget):
 
         self.dynamic_layout.addStretch(1)
 
-    def _add_dynamic_button(self, layout: QVBoxLayout, button_name: str) -> None:
+    def _add_dynamic_button(self, layout: QHBoxLayout | QVBoxLayout, button_name: str) -> None:
         button_text = button_name.replace("btn_", "").replace("_", " ").title()
         button = QPushButton(button_text)
+        button.setToolTip(button_name)
         command = self.command_for_button_name(button_name)
         if command is None:
             button.clicked.connect(
