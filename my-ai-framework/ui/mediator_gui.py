@@ -619,9 +619,11 @@ class LiveFigmaWindow(QWidget):
     def __init__(self, project_root: Path) -> None:
         super().__init__()
         self.project_root = project_root
+        self.figma_document: dict[str, Any] | None = None
         self.named_nodes: dict[str, dict[str, Any]] = {}
         self.grouped_nodes: dict[str, list[str]] = {}
         self.pixel_layout_mode = True
+        self.project_metrics: dict[str, Any] = {}
 
         self.setWindowTitle(f"Live Figma - {project_root.name}")
         self.resize(1260, 860)
@@ -770,6 +772,119 @@ class LiveFigmaWindow(QWidget):
             return None
         return (x, y, w, h)
 
+    def _rgba_css(self, color: dict[str, Any], opacity: float | None = None) -> str:
+        try:
+            r = int(float(color.get("r", 0.0)) * 255)
+            g = int(float(color.get("g", 0.0)) * 255)
+            b = int(float(color.get("b", 0.0)) * 255)
+        except (TypeError, ValueError, AttributeError):
+            return "rgba(0, 0, 0, 0)"
+        alpha = 1.0
+        if opacity is not None:
+            try:
+                alpha = float(opacity)
+            except (TypeError, ValueError):
+                alpha = 1.0
+        alpha = max(0.0, min(1.0, alpha))
+        return f"rgba({r}, {g}, {b}, {alpha:.3f})"
+
+    def _solid_fill_css(self, node: dict[str, Any], fallback: str = "transparent") -> str:
+        fills = node.get("fills")
+        if not isinstance(fills, list):
+            return fallback
+        for fill in fills:
+            if not isinstance(fill, dict):
+                continue
+            if fill.get("visible") is False:
+                continue
+            if fill.get("type") != "SOLID":
+                continue
+            color = fill.get("color")
+            if isinstance(color, dict):
+                return self._rgba_css(color, fill.get("opacity"))
+        return fallback
+
+    def _stroke_css(self, node: dict[str, Any], fallback: str = "transparent") -> tuple[float, str]:
+        strokes = node.get("strokes")
+        if not isinstance(strokes, list):
+            return (0.0, fallback)
+        stroke_weight = node.get("strokeWeight", 1)
+        try:
+            width = max(0.0, float(stroke_weight))
+        except (TypeError, ValueError):
+            width = 1.0
+        for stroke in strokes:
+            if not isinstance(stroke, dict):
+                continue
+            if stroke.get("visible") is False:
+                continue
+            if stroke.get("type") != "SOLID":
+                continue
+            color = stroke.get("color")
+            if isinstance(color, dict):
+                return (width, self._rgba_css(color, stroke.get("opacity")))
+        return (0.0, fallback)
+
+    def _corner_radius(self, node: dict[str, Any]) -> float:
+        radius = node.get("cornerRadius", 0)
+        try:
+            return max(0.0, float(radius))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _iter_figma_nodes(self, node: dict[str, Any]) -> list[dict[str, Any]]:
+        items = [node]
+        children = node.get("children")
+        if isinstance(children, list):
+            for child in children:
+                if isinstance(child, dict):
+                    items.extend(self._iter_figma_nodes(child))
+        return items
+
+    def _dynamic_text_for_node(self, node_name: str, fallback: str) -> str:
+        key = node_name.lower()
+        metrics = self.project_metrics
+        if key.startswith("status_global_healthy"):
+            healthy = metrics.get("services", 0) + metrics.get("agents", 0)
+            total = max(healthy, 1)
+            return f"{healthy}/{total}"
+        if key.startswith("status_backend_layers"):
+            return str(metrics.get("controllers", 0) + metrics.get("services", 0) + metrics.get("repositories", 0))
+        if key.startswith("status_service_count"):
+            return str(metrics.get("services", 0))
+        if key.startswith("status_agent_count"):
+            return str(metrics.get("agents", 0))
+        if key.startswith("status_project_name"):
+            return self.project_root.name
+        if key.startswith("log_"):
+            return self.activity_feed.toPlainText().splitlines()[-1] if self.activity_feed.toPlainText().strip() else fallback
+        return fallback
+
+    def _compute_project_metrics(self) -> dict[str, Any]:
+        summary, raw_json = parse_architecture(self.project_root)
+        controllers = 0
+        services = 0
+        repositories = 0
+        dtos = 0
+        try:
+            parsed = json.loads(raw_json)
+            service = parsed.get("service", {}) if isinstance(parsed, dict) else {}
+            if isinstance(service, dict):
+                controllers = len(service.get("controllers", []))
+                services = len(service.get("services", []))
+                repositories = len(service.get("repositories", []))
+                dtos = len(service.get("dtos", []))
+        except json.JSONDecodeError:
+            pass
+        return {
+            "summary": summary,
+            "controllers": controllers,
+            "services": services,
+            "repositories": repositories,
+            "dtos": dtos,
+            "agents": len(detect_agents(self.project_root)),
+        }
+
     def _point_in_rect(self, point: tuple[float, float], rect: tuple[float, float, float, float]) -> bool:
         px, py = point
         rx, ry, rw, rh = rect
@@ -829,6 +944,7 @@ class LiveFigmaWindow(QWidget):
 
     def build_from_nodes(self) -> None:
         self.clear_dynamic_layout()
+        self.project_metrics = self._compute_project_metrics()
 
         panel_names = self.grouped_nodes["panels"]
         button_names = self.grouped_nodes["buttons"]
@@ -960,21 +1076,23 @@ class LiveFigmaWindow(QWidget):
         self.dynamic_layout.addStretch(1)
 
     def _build_pixel_layout_canvas(self) -> bool:
-        panels: list[tuple[str, tuple[float, float, float, float]]] = []
-        visual_nodes: list[tuple[str, dict[str, Any], tuple[float, float, float, float]]] = []
+        if not isinstance(self.figma_document, dict):
+            return False
 
-        for name, node in self.named_nodes.items():
-            if not isinstance(node, dict):
-                continue
-            lowered = name.lower()
-            if not lowered.startswith(("panel_", "btn_", "card_", "status_", "input_", "log_", "meta_", "tab_")):
-                continue
+        visual_nodes: list[tuple[str, dict[str, Any], tuple[float, float, float, float]]] = []
+        for node in self._iter_figma_nodes(self.figma_document):
             bounds = self._node_bounds(node)
             if bounds is None:
                 continue
+            node_type = str(node.get("type", ""))
+            if node_type in {"PAGE", "SLICE", "CONNECTOR", "STICKY"}:
+                continue
+            width = bounds[2]
+            height = bounds[3]
+            if width < 3 or height < 3:
+                continue
+            name = str(node.get("name", node_type))
             visual_nodes.append((name, node, bounds))
-            if lowered.startswith("panel_"):
-                panels.append((name, bounds))
 
         if not visual_nodes:
             return False
@@ -990,48 +1108,26 @@ class LiveFigmaWindow(QWidget):
         canvas.setMinimumSize(max(canvas_width, 480), max(canvas_height, 320))
         canvas.setStyleSheet("background: #0c111a; border: 1px solid #1f2a3d; border-radius: 8px;")
 
-        panel_widgets: dict[str, tuple[QGroupBox, tuple[float, float, float, float]]] = {}
-        for panel_name, rect in sorted(panels, key=lambda item: item[1][2] * item[1][3], reverse=True):
-            node = self.named_nodes.get(panel_name, {})
-            accent = self._accent_color_for_node(node if isinstance(node, dict) else {})
+        for name, node, rect in sorted(visual_nodes, key=lambda item: item[2][2] * item[2][3], reverse=True):
+            node_type = str(node.get("type", ""))
             x, y, w, h = rect
-            panel = QGroupBox(self._node_label(panel_name, "panel_"), canvas)
-            panel.setGeometry(int(x - min_x + 12), int(y - min_y + 12), int(w), int(h))
-            panel.setStyleSheet(
-                "QGroupBox { border: 1px solid "
-                + accent
-                + "; border-radius: 8px; color: #d7e7ff; font-weight: 600; }"
-                + "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
-            )
-            panel_widgets[panel_name] = (panel, rect)
+            rel_x = int(x - min_x + 12)
+            rel_y = int(y - min_y + 12)
+            width = max(int(w), 2)
+            height = max(int(h), 2)
 
-        for name, _node, rect in visual_nodes:
             lowered = name.lower()
-            if lowered.startswith("panel_"):
-                continue
-
-            x, y, w, h = rect
-            center = (x + w / 2.0, y + h / 2.0)
-            parent_panel_name = self._find_parent_panel(center, panels)
-
-            if parent_panel_name and parent_panel_name in panel_widgets:
-                parent_widget, parent_rect = panel_widgets[parent_panel_name]
-                px, py, _pw, _ph = parent_rect
-                rel_x = int(x - px)
-                rel_y = int(y - py)
-                host = parent_widget
-            else:
-                rel_x = int(x - min_x + 12)
-                rel_y = int(y - min_y + 12)
-                host = canvas
-
-            width = max(int(w), 56)
-            height = max(int(h), 22)
-
             if lowered.startswith("btn_"):
-                button = QPushButton(self._node_label(name, "btn_"), host)
+                button_text = self._node_label(name, "btn_")
+                button = QPushButton(button_text, canvas)
                 button.setGeometry(rel_x, rel_y, width, height)
                 button.setToolTip(name)
+                bg = self._solid_fill_css(node, "#152033")
+                stroke_w, stroke_color = self._stroke_css(node, "#2c3f5f")
+                radius = self._corner_radius(node)
+                button.setStyleSheet(
+                    f"QPushButton {{ background: {bg}; border: {max(stroke_w, 1):.1f}px solid {stroke_color}; border-radius: {radius:.1f}px; }}"
+                )
                 command = self.command_for_button_name(name)
                 if command is None:
                     button.clicked.connect(
@@ -1041,17 +1137,53 @@ class LiveFigmaWindow(QWidget):
                     )
                 else:
                     button.clicked.connect(lambda _checked=False, c=command: self.run_command(c))
-            elif lowered.startswith("card_"):
-                card = QGroupBox(self._node_label(name, "card_"), host)
-                card.setGeometry(rel_x, rel_y, width, height)
-                card.setStyleSheet("QGroupBox { border: 1px solid #3a4b66; border-radius: 6px; }")
-            else:
-                label = QLabel(self._node_label(name, lowered.split("_")[0] + "_"), host)
+                continue
+
+            if node_type == "TEXT":
+                text = str(node.get("characters", "")).strip() or name
+                if lowered.startswith(("status_", "log_", "input_")):
+                    text = self._dynamic_text_for_node(name, text)
+                label = QLabel(text, canvas)
                 label.setGeometry(rel_x, rel_y, width, height)
-                label.setStyleSheet("color: #a8b9d4; border: 1px dashed #33445f; padding-left: 4px;")
+                label.setWordWrap(True)
+
+                style = node.get("style", {}) if isinstance(node.get("style"), dict) else {}
+                font_size = style.get("fontSize", 12)
+                font_weight = style.get("fontWeight", 400)
+                try:
+                    font_size_num = max(8.0, float(font_size))
+                except (TypeError, ValueError):
+                    font_size_num = 12.0
+                try:
+                    font_weight_num = int(font_weight)
+                except (TypeError, ValueError):
+                    font_weight_num = 400
+                text_color = self._solid_fill_css(node, "#d7dde8")
+                label.setStyleSheet(
+                    f"QLabel {{ background: transparent; color: {text_color}; font-size: {font_size_num:.1f}px; font-weight: {font_weight_num}; }}"
+                )
+                continue
+
+            block = QWidget(canvas)
+            block.setGeometry(rel_x, rel_y, width, height)
+            fill = self._solid_fill_css(node, "transparent")
+            stroke_w, stroke_color = self._stroke_css(node, "transparent")
+            radius = self._corner_radius(node)
+            block.setStyleSheet(
+                f"QWidget {{ background: {fill}; border: {stroke_w:.1f}px solid {stroke_color}; border-radius: {radius:.1f}px; }}"
+            )
+
+            if lowered.startswith("input_"):
+                input_hint = QLabel(self._dynamic_text_for_node(name, self._node_label(name, "input_")), block)
+                input_hint.setGeometry(6, 2, max(width - 12, 10), max(height - 4, 10))
+                input_hint.setStyleSheet("QLabel { background: transparent; color: #90a7c6; }")
+            if lowered.startswith("status_"):
+                value = QLabel(self._dynamic_text_for_node(name, self._node_label(name, "status_")), block)
+                value.setGeometry(6, 2, max(width - 12, 10), max(height - 4, 10))
+                value.setStyleSheet("QLabel { background: transparent; color: #d7dde8; font-weight: 600; }")
 
         self.dynamic_layout.addWidget(canvas)
-        self.add_activity("Rendered in pixel layout mode using Figma geometry")
+        self.add_activity("Rendered in pixel layout mode using full Figma frame geometry")
         return True
 
     def _add_dynamic_button(self, layout: QHBoxLayout | QVBoxLayout, button_name: str) -> None:
@@ -1193,6 +1325,9 @@ class LiveFigmaWindow(QWidget):
     def reload_from_figma(self) -> None:
         try:
             figma_json = fetch_figma_file()
+            document = figma_json.get("document")
+            if isinstance(document, dict):
+                self.figma_document = document
             self.named_nodes = figma_named_nodes(figma_json)
             self.grouped_nodes = categorize_named_nodes(self.named_nodes)
             update_figma_constants(self.grouped_nodes)
