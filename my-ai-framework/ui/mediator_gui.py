@@ -39,6 +39,7 @@ else:
 APP_STATE_DIR = Path.home() / ".mediator_desktop"
 PROJECTS_FILE = APP_STATE_DIR / "projects.json"
 FIGMA_SYNC_LOG = APP_STATE_DIR / "figma_sync.log"
+PLUGIN_CONTRACT_REL_PATH = Path(".mediator") / "figma_plugin_contract.json"
 
 FIGMA_META_TABS: list[str] = []
 FIGMA_PANELS: list[str] = []
@@ -347,6 +348,10 @@ def post_figma_comment(message: str, node_id: str | None = None) -> str:
     return "Figma comment push succeeded."
 
 
+def project_contract_path(project_root: Path) -> Path:
+    return project_root / PLUGIN_CONTRACT_REL_PATH
+
+
 class ArchitectureWindow(QWidget):
     def __init__(self, project_root: Path) -> None:
         super().__init__()
@@ -486,6 +491,10 @@ class LiveFigmaWindow(QWidget):
         push_btn = QPushButton("Push Backend Snapshot to Figma")
         push_btn.clicked.connect(self.push_backend_snapshot_to_figma)
         top_row.addWidget(push_btn)
+
+        export_btn = QPushButton("Export Plugin Contract")
+        export_btn.clicked.connect(self.export_plugin_contract)
+        top_row.addWidget(export_btn)
 
         copy_contract_btn = QPushButton("Copy Naming Contract")
         copy_contract_btn.clicked.connect(self.copy_naming_contract)
@@ -681,6 +690,7 @@ class LiveFigmaWindow(QWidget):
             return
 
         if command == "__figma_push__":
+            self.export_plugin_contract()
             self.push_backend_snapshot_to_figma()
             self.add_activity("Executed btn_figma_push (backend snapshot push)")
             return
@@ -710,6 +720,57 @@ class LiveFigmaWindow(QWidget):
         result = post_figma_comment(message, target_node_id)
         self.output.setPlainText(result)
         self.add_activity(result)
+
+    def build_plugin_contract(self) -> dict[str, Any]:
+        summary, raw_json = parse_architecture(self.project_root)
+        try:
+            backend_json = json.loads(raw_json)
+        except json.JSONDecodeError:
+            backend_json = {"raw": raw_json}
+
+        contract = {
+            "schemaVersion": "1.0.0",
+            "generatedAt": datetime.now().isoformat(timespec="seconds"),
+            "project": {
+                "name": self.project_root.name,
+                "root": str(self.project_root),
+            },
+            "figma": {
+                "fileKey": get_figma_file_key(),
+                "nodeGroups": {
+                    "metaTabs": FIGMA_META_TABS,
+                    "panels": FIGMA_PANELS,
+                    "buttons": FIGMA_BUTTONS,
+                    "cards": FIGMA_CARDS,
+                    "status": FIGMA_STATUS,
+                    "inputs": FIGMA_INPUTS,
+                    "logs": FIGMA_LOGS,
+                },
+            },
+            "bindings": {
+                "btn_agent_send": "broadcast agent status check",
+                "btn_service_connect": "ping all services",
+                "btn_figma_pull": "refresh design from figma",
+                "btn_figma_push": "push backend snapshot to figma",
+            },
+            "backendSummary": summary,
+            "backendArchitecture": backend_json,
+            "activityFeed": [
+                line.strip()
+                for line in self.activity_feed.toPlainText().splitlines()
+                if line.strip()
+            ][-200:],
+        }
+        return contract
+
+    def export_plugin_contract(self) -> Path:
+        contract = self.build_plugin_contract()
+        destination = project_contract_path(self.project_root)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(contract, indent=2), encoding="utf-8")
+        self.add_activity(f"Exported plugin contract: {destination}")
+        self.output.setPlainText(f"Plugin contract exported to:\n{destination}")
+        return destination
 
     def copy_naming_contract(self) -> None:
         contract = (

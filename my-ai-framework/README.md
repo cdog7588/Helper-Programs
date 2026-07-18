@@ -105,4 +105,23 @@ The current implementation supports this cycle:
 - Backend -> architecture summary/json extraction
 - Mediator -> Figma (comment push with backend snapshot)
 
+### Plugin Contract Export
+
+The live window now exports a plugin-side JSON contract per project:
+
+- `.mediator/figma_plugin_contract.json`
+
+Use the `Export Plugin Contract` button in the live Figma window, or trigger `btn_figma_push`.
+
+The contract includes:
+
+- grouped Figma naming nodes
+- backend architecture summary and json
+- command bindings
+- activity feed snapshot
+
+See:
+
+- `my-ai-framework/ui/FIGMA_PLUGIN_CONTRACT.md`
+
 For full write-back into text layers, a Figma plugin or future write-capable API flow is required.
