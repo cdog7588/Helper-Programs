@@ -43,6 +43,7 @@ FIGMA_SYNC_LOG = APP_STATE_DIR / "figma_sync.log"
 FIGMA_DESIGN_CACHE = APP_STATE_DIR / "figma_design_cache.json"
 PLUGIN_CONTRACT_REL_PATH = Path(".mediator") / "figma_plugin_contract.json"
 PLUGIN_PAYLOAD_REL_PATH = Path(".mediator") / "figma_payload.latest.json"
+PLUGIN_RENAME_PAYLOAD_REL_PATH = Path(".mediator") / "figma_rename_payload.latest.json"
 DEFAULT_FIGMA_PLUGIN_ENDPOINT = "http://127.0.0.1:8080/figma-plugin"
 
 FIGMA_META_TABS: list[str] = []
@@ -531,6 +532,10 @@ def project_payload_path(project_root: Path) -> Path:
     return project_root / PLUGIN_PAYLOAD_REL_PATH
 
 
+def project_rename_payload_path(project_root: Path) -> Path:
+    return project_root / PLUGIN_RENAME_PAYLOAD_REL_PATH
+
+
 def post_to_local_figma_plugin(payload: dict[str, Any], endpoint: str | None = None) -> str:
     target = endpoint or os.environ.get("MEDIATOR_FIGMA_PLUGIN_ENDPOINT", DEFAULT_FIGMA_PLUGIN_ENDPOINT)
     try:
@@ -694,6 +699,10 @@ class LiveFigmaWindow(QWidget):
         copy_contract_btn = QPushButton("Copy Naming Contract")
         copy_contract_btn.clicked.connect(self.copy_naming_contract)
         top_row.addWidget(copy_contract_btn)
+
+        enforce_contract_btn = QPushButton("Enforce Naming Contract")
+        enforce_contract_btn.clicked.connect(self.enforce_figma_naming_contract)
+        top_row.addWidget(enforce_contract_btn)
 
         self.auto_btn = QPushButton("Enable Auto Refresh (20s)")
         self.auto_btn.clicked.connect(self.toggle_auto_refresh)
@@ -878,6 +887,10 @@ class LiveFigmaWindow(QWidget):
                 if isinstance(child, dict):
                     items.extend(self._iter_figma_nodes(child))
         return items
+
+    def _is_node_visible(self, node: dict[str, Any]) -> bool:
+        visible = node.get("visible")
+        return visible is not False
 
     def _select_best_render_root(self) -> dict[str, Any] | None:
         if not isinstance(self.figma_document, dict):
@@ -1150,15 +1163,23 @@ class LiveFigmaWindow(QWidget):
             return False
 
         root_node = self.render_root if isinstance(self.render_root, dict) else self.figma_document
+        root_bounds = self._node_bounds(root_node)
 
         visual_nodes: list[tuple[str, dict[str, Any], tuple[float, float, float, float]]] = []
         for node in self._iter_figma_nodes(root_node):
+            if not self._is_node_visible(node):
+                continue
             bounds = self._node_bounds(node)
             if bounds is None:
                 continue
             node_type = str(node.get("type", ""))
             if node_type in {"PAGE", "SLICE", "CONNECTOR", "STICKY"}:
                 continue
+            if root_bounds is not None:
+                rx, ry, rw, rh = root_bounds
+                x, y, w, h = bounds
+                if (x + w) < rx or x > (rx + rw) or (y + h) < ry or y > (ry + rh):
+                    continue
             width = bounds[2]
             height = bounds[3]
             if width < 3 or height < 3:
@@ -1169,19 +1190,26 @@ class LiveFigmaWindow(QWidget):
         if not visual_nodes:
             return False
 
-        min_x = min(bounds[0] for _, _, bounds in visual_nodes)
-        min_y = min(bounds[1] for _, _, bounds in visual_nodes)
-        max_x = max(bounds[0] + bounds[2] for _, _, bounds in visual_nodes)
-        max_y = max(bounds[1] + bounds[3] for _, _, bounds in visual_nodes)
+        if root_bounds is not None:
+            min_x, min_y, root_w, root_h = root_bounds
+            max_x = min_x + root_w
+            max_y = min_y + root_h
+        else:
+            min_x = min(bounds[0] for _, _, bounds in visual_nodes)
+            min_y = min(bounds[1] for _, _, bounds in visual_nodes)
+            max_x = max(bounds[0] + bounds[2] for _, _, bounds in visual_nodes)
+            max_y = max(bounds[1] + bounds[3] for _, _, bounds in visual_nodes)
 
         base_width = max_x - min_x + 24
         base_height = max_y - min_y + 24
         viewport = self.scroll.viewport().size()
-        available_w = max(320, viewport.width() - 20)
-        available_h = max(240, viewport.height() - 20)
+        viewport_w = viewport.width() if viewport.width() > 0 else self.scroll.width()
+        viewport_h = viewport.height() if viewport.height() > 0 else self.scroll.height()
+        available_w = max(320, viewport_w - 20)
+        available_h = max(240, viewport_h - 20)
         sx = available_w / max(base_width, 1)
         sy = available_h / max(base_height, 1)
-        scale = max(0.35, min(2.0, min(sx, sy)))
+        scale = max(0.55, min(2.2, min(sx, sy)))
 
         canvas = QWidget()
         canvas_width = int(base_width * scale) + 16
@@ -1189,7 +1217,8 @@ class LiveFigmaWindow(QWidget):
         canvas.setMinimumSize(max(canvas_width, 480), max(canvas_height, 320))
         canvas.setStyleSheet("background: #0c111a; border: 1px solid #1f2a3d; border-radius: 8px;")
 
-        for name, node, rect in sorted(visual_nodes, key=lambda item: item[2][2] * item[2][3], reverse=True):
+        # Preserve Figma z-order by rendering in traversal order rather than area sorting.
+        for name, node, rect in visual_nodes:
             node_type = str(node.get("type", ""))
             x, y, w, h = rect
             rel_x = int((x - min_x + 12) * scale)
@@ -1205,7 +1234,7 @@ class LiveFigmaWindow(QWidget):
                 button.setToolTip(name)
                 bg = self._solid_fill_css(node, "#152033")
                 stroke_w, stroke_color = self._stroke_css(node, "#2c3f5f")
-                radius = self._corner_radius(node)
+                radius = self._corner_radius(node) * scale
                 button.setStyleSheet(
                     f"QPushButton {{ background: {bg}; border: {max(stroke_w, 1):.1f}px solid {stroke_color}; border-radius: {radius:.1f}px; }}"
                 )
@@ -1404,6 +1433,79 @@ class LiveFigmaWindow(QWidget):
             },
             "backendArchitecture": json.loads(raw_json) if raw_json.strip().startswith("{") else {},
         }
+
+    def build_figma_rename_payload(self) -> dict[str, Any]:
+        required_tabs = [
+            "meta_tab_dashboard",
+            "meta_tab_backend_architecture",
+            "meta_tab_frontend_architecture",
+            "meta_tab_agents",
+            "meta_tab_projects_services",
+            "meta_tab_mediator_control",
+        ]
+        required_panels = [
+            "panel_dashboard_activity_feed",
+            "panel_dashboard_log",
+            "panel_backend_layers",
+            "panel_backend_connections",
+            "panel_backend_log",
+            "panel_frontend_layers",
+            "panel_frontend_state_cache",
+            "panel_agents_root",
+            "panel_projects_root",
+            "panel_mediator_output",
+            "panel_logs",
+        ]
+        return {
+            "meta": {
+                "source": "mediator_app",
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "operation": "rewrite",
+            },
+            "rename": {
+                "Dashboard tab": "meta_tab_dashboard",
+                "Backend / Architecture tab": "meta_tab_backend_architecture",
+                "Frontend tab": "meta_tab_frontend_architecture",
+                "Agents tab": "meta_tab_agents",
+                "Projects tab": "meta_tab_projects_services",
+                "Mediator tab": "meta_tab_mediator_control",
+            },
+            "createHiddenLayers": required_tabs,
+            "panelRename": {
+                "Activity Feed": "panel_dashboard_activity_feed",
+                "Dashboard Log": "panel_dashboard_log",
+                "Backend Layers": "panel_backend_layers",
+                "Backend Connections": "panel_backend_connections",
+                "Backend Log": "panel_backend_log",
+                "Frontend Layers": "panel_frontend_layers",
+                "State Cache": "panel_frontend_state_cache",
+                "Agents Root": "panel_agents_root",
+                "Projects Root": "panel_projects_root",
+                "Mediator Output": "panel_mediator_output",
+                "Mediator Logs": "panel_logs",
+            },
+            "autoCreate": {
+                "tabs": required_tabs,
+                "panels": required_panels,
+            },
+        }
+
+    def enforce_figma_naming_contract(self) -> None:
+        payload = self.build_figma_rename_payload()
+        payload_path = project_rename_payload_path(self.project_root)
+        payload_path.parent.mkdir(parents=True, exist_ok=True)
+        payload_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+        local_push_result = post_to_local_figma_plugin(payload)
+        output = (
+            "Generated naming-contract rewrite payload.\n"
+            "Note: plugin-side rewrite handler is required to execute rename/panelRename/createHiddenLayers.\n\n"
+            f"{local_push_result}\n"
+            f"Rename payload saved: {payload_path}"
+        )
+        self.output.setPlainText(output)
+        self.add_activity("Generated Figma naming rewrite payload")
+        self.add_activity(local_push_result)
 
     def build_plugin_contract(self) -> dict[str, Any]:
         summary, raw_json = parse_architecture(self.project_root)
