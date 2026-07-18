@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Multi-project Mediator desktop UI (PySide6)."""
+"""Multi-project Mediator desktop UI (PySide6) with live Figma support."""
 
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt
+import requests
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -21,13 +23,39 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from figma_config import get_figma_file_key, get_figma_token  # type: ignore
+else:
+    from .figma_config import get_figma_file_key, get_figma_token
+
 APP_STATE_DIR = Path.home() / ".mediator_desktop"
 PROJECTS_FILE = APP_STATE_DIR / "projects.json"
+
+IGNORE_DIR_NAMES = {
+    ".git",
+    ".idea",
+    ".vscode",
+    "node_modules",
+    "dist",
+    "build",
+    "out",
+    "target",
+    "venv",
+    ".venv",
+    "env",
+    "__pycache__",
+}
+
+SPRING_ENDPOINT_PATTERN = re.compile(
+    r"@(?P<anno>GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)\s*\(\s*\"(?P<path>[^\"]+)\""
+)
 
 
 def load_projects() -> list[str]:
@@ -37,7 +65,6 @@ def load_projects() -> list[str]:
         data = json.loads(PROJECTS_FILE.read_text(encoding="utf-8"))
         if isinstance(data, list):
             projects = [str(Path(item).resolve()) for item in data if isinstance(item, str)]
-            # Preserve user order while removing duplicates.
             deduped: list[str] = []
             seen = set()
             for project in projects:
@@ -55,21 +82,100 @@ def save_projects(project_paths: list[str]) -> None:
     PROJECTS_FILE.write_text(json.dumps(project_paths, indent=2), encoding="utf-8")
 
 
+def _extract_controller_endpoints(file_path: Path) -> list[dict[str, str]]:
+    endpoints: list[dict[str, str]] = []
+    try:
+        text = file_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return endpoints
+
+    for match in SPRING_ENDPOINT_PATTERN.finditer(text):
+        anno = match.group("anno")
+        endpoint_path = match.group("path")
+        method = anno.replace("Mapping", "").upper()
+        endpoints.append({"method": method, "path": endpoint_path, "returns": "Object"})
+    return endpoints
+
+
+def _discover_backend_architecture(project_root: Path) -> dict[str, Any]:
+    controllers: list[dict[str, Any]] = []
+    services: list[dict[str, Any]] = []
+    repositories: list[dict[str, Any]] = []
+    dtos: list[dict[str, Any]] = []
+
+    for file_path in project_root.rglob("*"):
+        if not file_path.is_file():
+            continue
+        if any(part in IGNORE_DIR_NAMES for part in file_path.parts):
+            continue
+        if file_path.suffix.lower() not in {".java", ".kt", ".py", ".ts", ".js"}:
+            continue
+
+        stem = file_path.stem
+        lowered = stem.lower()
+
+        if lowered.endswith("controller"):
+            controllers.append(
+                {
+                    "name": stem,
+                    "endpoints": _extract_controller_endpoints(file_path),
+                    "source": str(file_path.relative_to(project_root)),
+                }
+            )
+        elif lowered.endswith("service"):
+            services.append(
+                {
+                    "name": stem,
+                    "methods": [],
+                    "source": str(file_path.relative_to(project_root)),
+                }
+            )
+        elif lowered.endswith("repository"):
+            repositories.append(
+                {
+                    "name": stem,
+                    "entity": "UnknownEntity",
+                    "source": str(file_path.relative_to(project_root)),
+                }
+            )
+        elif lowered.endswith("dto") or lowered.endswith("model") or lowered.endswith("entity"):
+            dtos.append(
+                {
+                    "name": stem,
+                    "fields": {},
+                    "source": str(file_path.relative_to(project_root)),
+                }
+            )
+
+    return {
+        "service": {
+            "name": project_root.name,
+            "controllers": sorted(controllers, key=lambda item: item["name"]),
+            "services": sorted(services, key=lambda item: item["name"]),
+            "repositories": sorted(repositories, key=lambda item: item["name"]),
+            "dtos": sorted(dtos, key=lambda item: item["name"]),
+        },
+        "meta": {
+            "generatedBy": "WorkspaceAnalyzer",
+            "mode": "fallback-scan",
+            "projectRoot": str(project_root),
+        },
+    }
+
+
 def parse_architecture(project_root: Path) -> tuple[str, str]:
     arch_path = project_root / "architecture-generator" / "architecture.json"
-    if not arch_path.exists():
-        return (
-            "No architecture file found.",
-            f"Expected architecture file at: {arch_path}",
-        )
+    used_fallback = False
 
-    try:
-        data = json.loads(arch_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return (
-            "Could not parse architecture file.",
-            f"Error reading {arch_path}: {exc}",
-        )
+    if arch_path.exists():
+        try:
+            data: dict[str, Any] = json.loads(arch_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = _discover_backend_architecture(project_root)
+            used_fallback = True
+    else:
+        data = _discover_backend_architecture(project_root)
+        used_fallback = True
 
     service = data.get("service", {}) if isinstance(data, dict) else {}
     controllers = service.get("controllers", []) if isinstance(service, dict) else []
@@ -81,18 +187,25 @@ def parse_architecture(project_root: Path) -> tuple[str, str]:
         "Backend Architecture Summary",
         "============================",
         f"Project: {project_root}",
+        f"mode: {'WorkspaceAnalyzer fallback scan' if used_fallback else 'architecture.json'}",
         "",
         f"controllers: {len(controllers)}",
         f"services: {len(services)}",
         f"repositories: {len(repositories)}",
-        f"dtos: {len(dtos)}",
+        f"dtos/models/entities: {len(dtos)}",
     ]
+
+    if used_fallback:
+        summary_lines.append(
+            "\nNo architecture-generator/architecture.json was found, so WorkspaceAnalyzer inferred structure from source files."
+        )
+
     pretty_json = json.dumps(data, indent=2)
     return "\n".join(summary_lines), pretty_json
 
 
 def detect_agents(project_root: Path) -> list[str]:
-    agents: set[str] = set()
+    agents: set[str] = {"WorkspaceAnalyzer"}
     for folder in (
         project_root / ".github" / "agents",
         project_root / "my-ai-framework" / "agents",
@@ -109,7 +222,7 @@ def run_mediator_command(project_root: Path, command: str) -> str:
     if not bridge_path.exists():
         return (
             "This project does not have mediator_bridge.py yet.\n"
-            "You can still inspect architecture and agents, but command execution requires mediator runtime files."
+            "Analyzer windows still work, but command execution requires mediator runtime files in that project."
         )
 
     process = subprocess.run(
@@ -125,6 +238,37 @@ def run_mediator_command(project_root: Path, command: str) -> str:
     if stderr:
         return stderr
     return f"Mediator command exited with code {process.returncode}"
+
+
+def fetch_figma_file() -> dict[str, Any]:
+    token = get_figma_token()
+    file_key = get_figma_file_key()
+    if not token or not file_key:
+        raise RuntimeError("Missing FIGMA_TOKEN or FIGMA_FILE_KEY environment variable.")
+
+    url = f"https://api.figma.com/v1/files/{file_key}"
+    response = requests.get(url, headers={"X-Figma-Token": token}, timeout=20)
+    response.raise_for_status()
+    return response.json()
+
+
+def figma_named_nodes(figma_json: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    named: dict[str, dict[str, Any]] = {}
+
+    def walk(node: dict[str, Any]) -> None:
+        name = node.get("name")
+        if isinstance(name, str) and name:
+            named[name] = node
+        children = node.get("children")
+        if isinstance(children, list):
+            for child in children:
+                if isinstance(child, dict):
+                    walk(child)
+
+    document = figma_json.get("document")
+    if isinstance(document, dict):
+        walk(document)
+    return named
 
 
 class ArchitectureWindow(QWidget):
@@ -149,7 +293,7 @@ class ArchitectureWindow(QWidget):
         root_layout.addWidget(refresh_btn)
         root_layout.addWidget(QLabel("Summary"))
         root_layout.addWidget(self.summary, 1)
-        root_layout.addWidget(QLabel("Raw architecture.json"))
+        root_layout.addWidget(QLabel("Architecture JSON (file or analyzed fallback)"))
         root_layout.addWidget(self.raw_json, 3)
 
         self.refresh()
@@ -206,8 +350,6 @@ class ActionsWindow(QWidget):
         self.agent_list.clear()
         for name in detect_agents(self.project_root):
             self.agent_list.addItem(QListWidgetItem(name))
-        if self.agent_list.count() == 0:
-            self.agent_list.addItem(QListWidgetItem("No agent definitions found in this project."))
 
     def run_command(self, command: str) -> None:
         result = run_mediator_command(self.project_root, command)
@@ -220,21 +362,176 @@ class ActionsWindow(QWidget):
             self.run_command(command.strip())
 
 
+class LiveFigmaWindow(QWidget):
+    def __init__(self, project_root: Path) -> None:
+        super().__init__()
+        self.project_root = project_root
+        self.named_nodes: dict[str, dict[str, Any]] = {}
+
+        self.setWindowTitle(f"Live Figma - {project_root.name}")
+        self.resize(1100, 760)
+
+        root_layout = QVBoxLayout()
+        self.setLayout(root_layout)
+
+        top_row = QHBoxLayout()
+        root_layout.addLayout(top_row)
+
+        refresh_btn = QPushButton("Refresh from Figma")
+        refresh_btn.clicked.connect(self.reload_from_figma)
+        top_row.addWidget(refresh_btn)
+
+        self.auto_btn = QPushButton("Enable Auto Refresh (20s)")
+        self.auto_btn.clicked.connect(self.toggle_auto_refresh)
+        top_row.addWidget(self.auto_btn)
+
+        top_row.addStretch(1)
+
+        self.info = QLabel("Waiting for Figma load...")
+        root_layout.addWidget(self.info)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        root_layout.addWidget(self.scroll, 1)
+
+        self.dynamic_root = QWidget()
+        self.dynamic_layout = QVBoxLayout()
+        self.dynamic_root.setLayout(self.dynamic_layout)
+        self.scroll.setWidget(self.dynamic_root)
+
+        self.output = QTextEdit()
+        self.output.setReadOnly(True)
+        root_layout.addWidget(self.output, 1)
+
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.setInterval(20_000)
+        self.refresh_timer.timeout.connect(self.reload_from_figma)
+
+        self.reload_from_figma()
+
+    def clear_dynamic_layout(self) -> None:
+        while self.dynamic_layout.count() > 0:
+            item = self.dynamic_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def command_for_button_name(self, name: str) -> str | None:
+        key = name.lower()
+        if "analy" in key:
+            return "analyze backend architecture"
+        if "sync" in key:
+            return "sync architecture"
+        if "deploy" in key:
+            return "deploy"
+        if "audit" in key:
+            return "audit"
+        if "valid" in key:
+            return "validate architecture"
+        return None
+
+    def build_from_nodes(self) -> None:
+        self.clear_dynamic_layout()
+
+        panel_names = sorted([name for name in self.named_nodes if name.lower().startswith("panel_")])
+        button_names = sorted([name for name in self.named_nodes if name.lower().startswith("btn_")])
+
+        if not panel_names and not button_names:
+            self.dynamic_layout.addWidget(
+                QLabel("No panel_/btn_ named layers found. Add those names in Figma to drive UI structure.")
+            )
+            self.dynamic_layout.addStretch(1)
+            return
+
+        for panel_name in panel_names:
+            group = QGroupBox(panel_name.replace("panel_", "").replace("_", " ").title())
+            group_layout = QVBoxLayout()
+            group.setLayout(group_layout)
+
+            group_layout.addWidget(QLabel(f"Source node: {panel_name}"))
+
+            # Place matching buttons inside the panel by prefix convention, e.g. panel_agents + btn_agents_sync
+            panel_key = panel_name.lower().replace("panel_", "")
+            linked = [name for name in button_names if panel_key in name.lower()]
+            for button_name in linked:
+                self._add_dynamic_button(group_layout, button_name)
+
+            self.dynamic_layout.addWidget(group)
+
+        unassigned = [
+            name
+            for name in button_names
+            if not any(name.lower() in [item.lower() for item in button_names if p.lower().replace("panel_", "") in name.lower()] for p in panel_names)
+        ]
+        if unassigned:
+            group = QGroupBox("Actions")
+            group_layout = QVBoxLayout()
+            group.setLayout(group_layout)
+            for button_name in unassigned:
+                self._add_dynamic_button(group_layout, button_name)
+            self.dynamic_layout.addWidget(group)
+
+        self.dynamic_layout.addStretch(1)
+
+    def _add_dynamic_button(self, layout: QVBoxLayout, button_name: str) -> None:
+        button_text = button_name.replace("btn_", "").replace("_", " ").title()
+        button = QPushButton(button_text)
+        command = self.command_for_button_name(button_name)
+        if command is None:
+            button.clicked.connect(
+                lambda _checked=False, n=button_name: self.output.setPlainText(
+                    f"No command mapping for {n}.\nUse btn_analyze, btn_sync, btn_deploy, btn_audit, btn_validate, or extend mapping."
+                )
+            )
+        else:
+            button.clicked.connect(lambda _checked=False, c=command: self.run_command(c))
+        layout.addWidget(button)
+
+    def run_command(self, command: str) -> None:
+        result = run_mediator_command(self.project_root, command)
+        self.output.setPlainText(f"Project: {self.project_root}\nCommand: {command}\n\n{result}")
+
+    def reload_from_figma(self) -> None:
+        try:
+            figma_json = fetch_figma_file()
+            self.named_nodes = figma_named_nodes(figma_json)
+            self.info.setText(
+                f"Loaded {len(self.named_nodes)} named Figma nodes for {self.project_root.name}."
+            )
+            self.build_from_nodes()
+        except Exception as exc:  # noqa: BLE001
+            self.info.setText("Figma load failed.")
+            self.output.setPlainText(
+                "Could not fetch live Figma file.\n"
+                f"Reason: {exc}\n\n"
+                "Set FIGMA_TOKEN and FIGMA_FILE_KEY environment variables and retry."
+            )
+
+    def toggle_auto_refresh(self) -> None:
+        if self.refresh_timer.isActive():
+            self.refresh_timer.stop()
+            self.auto_btn.setText("Enable Auto Refresh (20s)")
+        else:
+            self.refresh_timer.start()
+            self.auto_btn.setText("Disable Auto Refresh")
+
+
 class MediatorDesktopWindow(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.projects: list[str] = load_projects()
         self.arch_window: ArchitectureWindow | None = None
         self.actions_window: ActionsWindow | None = None
+        self.figma_window: LiveFigmaWindow | None = None
 
         self.setWindowTitle("Mediator Desktop - Multi Project")
-        self.resize(900, 640)
+        self.resize(920, 680)
 
         root_layout = QVBoxLayout()
         self.setLayout(root_layout)
 
         header = QLabel(
-            "Open any project folder. Then launch Architecture and Agents windows for that project."
+            "Select a project and open: Architecture, Agents/Actions, or Live Figma (dynamic UI)."
         )
         header.setWordWrap(True)
         header.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
@@ -261,6 +558,10 @@ class MediatorDesktopWindow(QWidget):
         open_actions_btn = QPushButton("Open Agents and Actions Window")
         open_actions_btn.clicked.connect(self.open_actions_window)
         button_row.addWidget(open_actions_btn)
+
+        open_figma_btn = QPushButton("Open Live Figma Window")
+        open_figma_btn.clicked.connect(self.open_figma_window)
+        button_row.addWidget(open_figma_btn)
 
         self.status = QLabel("")
         root_layout.addWidget(self.status)
@@ -312,7 +613,6 @@ class MediatorDesktopWindow(QWidget):
         project_root = self.selected_project_root()
         if project_root is None:
             return
-
         if not project_root.exists():
             QMessageBox.warning(self, "Missing folder", f"Project folder not found: {project_root}")
             return
@@ -324,13 +624,23 @@ class MediatorDesktopWindow(QWidget):
         project_root = self.selected_project_root()
         if project_root is None:
             return
-
         if not project_root.exists():
             QMessageBox.warning(self, "Missing folder", f"Project folder not found: {project_root}")
             return
 
         self.actions_window = ActionsWindow(project_root)
         self.actions_window.show()
+
+    def open_figma_window(self) -> None:
+        project_root = self.selected_project_root()
+        if project_root is None:
+            return
+        if not project_root.exists():
+            QMessageBox.warning(self, "Missing folder", f"Project folder not found: {project_root}")
+            return
+
+        self.figma_window = LiveFigmaWindow(project_root)
+        self.figma_window.show()
 
 
 def main() -> int:
