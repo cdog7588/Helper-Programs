@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,15 @@ else:
 
 APP_STATE_DIR = Path.home() / ".mediator_desktop"
 PROJECTS_FILE = APP_STATE_DIR / "projects.json"
+FIGMA_SYNC_LOG = APP_STATE_DIR / "figma_sync.log"
+
+FIGMA_META_TABS: list[str] = []
+FIGMA_PANELS: list[str] = []
+FIGMA_BUTTONS: list[str] = []
+FIGMA_CARDS: list[str] = []
+FIGMA_STATUS: list[str] = []
+FIGMA_INPUTS: list[str] = []
+FIGMA_LOGS: list[str] = []
 
 IGNORE_DIR_NAMES = {
     ".git",
@@ -271,6 +281,72 @@ def figma_named_nodes(figma_json: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return named
 
 
+def categorize_named_nodes(named_nodes: dict[str, dict[str, Any]]) -> dict[str, list[str]]:
+    groups = {
+        "meta_tabs": [],
+        "panels": [],
+        "buttons": [],
+        "cards": [],
+        "status": [],
+        "inputs": [],
+        "logs": [],
+    }
+
+    for name in sorted(named_nodes.keys()):
+        lowered = name.lower()
+        if lowered.startswith("meta_") or lowered.startswith("tab_"):
+            groups["meta_tabs"].append(name)
+        if lowered.startswith("panel_"):
+            groups["panels"].append(name)
+        if lowered.startswith("btn_"):
+            groups["buttons"].append(name)
+        if lowered.startswith("card_"):
+            groups["cards"].append(name)
+        if lowered.startswith("status_"):
+            groups["status"].append(name)
+        if lowered.startswith("input_"):
+            groups["inputs"].append(name)
+        if lowered.startswith("log_"):
+            groups["logs"].append(name)
+
+    return groups
+
+
+def update_figma_constants(groups: dict[str, list[str]]) -> None:
+    global FIGMA_META_TABS, FIGMA_PANELS, FIGMA_BUTTONS, FIGMA_CARDS, FIGMA_STATUS, FIGMA_INPUTS, FIGMA_LOGS
+    FIGMA_META_TABS = groups["meta_tabs"]
+    FIGMA_PANELS = groups["panels"]
+    FIGMA_BUTTONS = groups["buttons"]
+    FIGMA_CARDS = groups["cards"]
+    FIGMA_STATUS = groups["status"]
+    FIGMA_INPUTS = groups["inputs"]
+    FIGMA_LOGS = groups["logs"]
+
+
+def append_figma_sync_log(message: str) -> None:
+    APP_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    with FIGMA_SYNC_LOG.open("a", encoding="utf-8") as log_file:
+        log_file.write(f"[{timestamp}] {message}\n")
+
+
+def post_figma_comment(message: str, node_id: str | None = None) -> str:
+    token = get_figma_token()
+    file_key = get_figma_file_key()
+    if not token or not file_key:
+        return "Missing FIGMA_TOKEN or FIGMA_FILE_KEY environment variable."
+
+    url = f"https://api.figma.com/v1/files/{file_key}/comments"
+    payload: dict[str, Any] = {"message": message}
+    if node_id:
+        payload["client_meta"] = {"node_id": node_id}
+
+    response = requests.post(url, headers={"X-Figma-Token": token}, json=payload, timeout=20)
+    if response.status_code >= 400:
+        return f"Figma comment push failed ({response.status_code}): {response.text[:240]}"
+    return "Figma comment push succeeded."
+
+
 class ArchitectureWindow(QWidget):
     def __init__(self, project_root: Path) -> None:
         super().__init__()
@@ -367,9 +443,35 @@ class LiveFigmaWindow(QWidget):
         super().__init__()
         self.project_root = project_root
         self.named_nodes: dict[str, dict[str, Any]] = {}
+        self.grouped_nodes: dict[str, list[str]] = {}
 
         self.setWindowTitle(f"Live Figma - {project_root.name}")
-        self.resize(1100, 760)
+        self.resize(1260, 860)
+        self.setStyleSheet(
+            """
+            QWidget { background: #0d1117; color: #d7dde8; }
+            QGroupBox {
+                border: 1px solid #2a3445;
+                border-radius: 8px;
+                margin-top: 10px;
+                font-weight: 600;
+                color: #a7d3ff;
+            }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
+            QPushButton {
+                background: #152033;
+                border: 1px solid #2c3f5f;
+                border-radius: 6px;
+                padding: 6px 10px;
+            }
+            QPushButton:hover { background: #1b2a45; }
+            QTextEdit, QListWidget, QScrollArea {
+                background: #0f1624;
+                border: 1px solid #253147;
+                border-radius: 6px;
+            }
+            """
+        )
 
         root_layout = QVBoxLayout()
         self.setLayout(root_layout)
@@ -380,6 +482,14 @@ class LiveFigmaWindow(QWidget):
         refresh_btn = QPushButton("Refresh from Figma")
         refresh_btn.clicked.connect(self.reload_from_figma)
         top_row.addWidget(refresh_btn)
+
+        push_btn = QPushButton("Push Backend Snapshot to Figma")
+        push_btn.clicked.connect(self.push_backend_snapshot_to_figma)
+        top_row.addWidget(push_btn)
+
+        copy_contract_btn = QPushButton("Copy Naming Contract")
+        copy_contract_btn.clicked.connect(self.copy_naming_contract)
+        top_row.addWidget(copy_contract_btn)
 
         self.auto_btn = QPushButton("Enable Auto Refresh (20s)")
         self.auto_btn.clicked.connect(self.toggle_auto_refresh)
@@ -399,6 +509,10 @@ class LiveFigmaWindow(QWidget):
         self.dynamic_root.setLayout(self.dynamic_layout)
         self.scroll.setWidget(self.dynamic_root)
 
+        self.activity_feed = QTextEdit()
+        self.activity_feed.setReadOnly(True)
+        root_layout.addWidget(self.activity_feed, 1)
+
         self.output = QTextEdit()
         self.output.setReadOnly(True)
         root_layout.addWidget(self.output, 1)
@@ -409,6 +523,13 @@ class LiveFigmaWindow(QWidget):
 
         self.reload_from_figma()
 
+    def add_activity(self, message: str) -> None:
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        line = f"[{timestamp}] {message}"
+        existing = self.activity_feed.toPlainText().strip()
+        self.activity_feed.setPlainText((existing + "\n" + line).strip())
+        append_figma_sync_log(f"{self.project_root.name}: {message}")
+
     def clear_dynamic_layout(self) -> None:
         while self.dynamic_layout.count() > 0:
             item = self.dynamic_layout.takeAt(0)
@@ -418,6 +539,14 @@ class LiveFigmaWindow(QWidget):
 
     def command_for_button_name(self, name: str) -> str | None:
         key = name.lower()
+        if key == "btn_agent_send":
+            return "__agent_send__"
+        if key == "btn_service_connect":
+            return "__service_connect__"
+        if key == "btn_figma_pull":
+            return "__figma_pull__"
+        if key == "btn_figma_push":
+            return "__figma_push__"
         if "analy" in key:
             return "analyze backend architecture"
         if "sync" in key:
@@ -433,8 +562,13 @@ class LiveFigmaWindow(QWidget):
     def build_from_nodes(self) -> None:
         self.clear_dynamic_layout()
 
-        panel_names = sorted([name for name in self.named_nodes if name.lower().startswith("panel_")])
-        button_names = sorted([name for name in self.named_nodes if name.lower().startswith("btn_")])
+        panel_names = self.grouped_nodes["panels"]
+        button_names = self.grouped_nodes["buttons"]
+        meta_tabs = self.grouped_nodes["meta_tabs"]
+        cards = self.grouped_nodes["cards"]
+        status_nodes = self.grouped_nodes["status"]
+        input_nodes = self.grouped_nodes["inputs"]
+        log_nodes = self.grouped_nodes["logs"]
 
         if not panel_names and not button_names:
             self.dynamic_layout.addWidget(
@@ -442,6 +576,17 @@ class LiveFigmaWindow(QWidget):
             )
             self.dynamic_layout.addStretch(1)
             return
+
+        if meta_tabs:
+            tabs_box = QGroupBox("Meta Tabs")
+            tabs_layout = QHBoxLayout()
+            tabs_box.setLayout(tabs_layout)
+            for tab_name in meta_tabs:
+                pill = QLabel(tab_name)
+                pill.setStyleSheet("padding:4px 8px; border:1px solid #33445f; border-radius:12px;")
+                tabs_layout.addWidget(pill)
+            tabs_layout.addStretch(1)
+            self.dynamic_layout.addWidget(tabs_box)
 
         for panel_name in panel_names:
             group = QGroupBox(panel_name.replace("panel_", "").replace("_", " ").title())
@@ -458,11 +603,8 @@ class LiveFigmaWindow(QWidget):
 
             self.dynamic_layout.addWidget(group)
 
-        unassigned = [
-            name
-            for name in button_names
-            if not any(name.lower() in [item.lower() for item in button_names if p.lower().replace("panel_", "") in name.lower()] for p in panel_names)
-        ]
+        panel_keys = [p.lower().replace("panel_", "") for p in panel_names]
+        unassigned = [name for name in button_names if not any(key and key in name.lower() for key in panel_keys)]
         if unassigned:
             group = QGroupBox("Actions")
             group_layout = QVBoxLayout()
@@ -470,6 +612,38 @@ class LiveFigmaWindow(QWidget):
             for button_name in unassigned:
                 self._add_dynamic_button(group_layout, button_name)
             self.dynamic_layout.addWidget(group)
+
+        if cards:
+            card_box = QGroupBox("Cards")
+            card_layout = QVBoxLayout()
+            card_box.setLayout(card_layout)
+            for name in cards:
+                card_layout.addWidget(QLabel(f"card: {name}"))
+            self.dynamic_layout.addWidget(card_box)
+
+        if status_nodes:
+            status_box = QGroupBox("Status Widgets")
+            status_layout = QVBoxLayout()
+            status_box.setLayout(status_layout)
+            for name in status_nodes:
+                status_layout.addWidget(QLabel(f"status: {name}"))
+            self.dynamic_layout.addWidget(status_box)
+
+        if input_nodes:
+            input_box = QGroupBox("Inputs")
+            input_layout = QVBoxLayout()
+            input_box.setLayout(input_layout)
+            for name in input_nodes:
+                input_layout.addWidget(QLabel(f"input: {name}"))
+            self.dynamic_layout.addWidget(input_box)
+
+        if log_nodes:
+            log_box = QGroupBox("Log Widgets")
+            log_layout = QVBoxLayout()
+            log_box.setLayout(log_layout)
+            for name in log_nodes:
+                log_layout.addWidget(QLabel(f"log: {name}"))
+            self.dynamic_layout.addWidget(log_box)
 
         self.dynamic_layout.addStretch(1)
 
@@ -480,7 +654,7 @@ class LiveFigmaWindow(QWidget):
         if command is None:
             button.clicked.connect(
                 lambda _checked=False, n=button_name: self.output.setPlainText(
-                    f"No command mapping for {n}.\nUse btn_analyze, btn_sync, btn_deploy, btn_audit, btn_validate, or extend mapping."
+                    f"No command mapping for {n}.\nUse btn_agent_send, btn_service_connect, btn_figma_pull, btn_figma_push, or extend mapping."
                 )
             )
         else:
@@ -488,16 +662,90 @@ class LiveFigmaWindow(QWidget):
         layout.addWidget(button)
 
     def run_command(self, command: str) -> None:
+        if command == "__agent_send__":
+            agents = ", ".join(detect_agents(self.project_root))
+            result = f"Broadcast agent status check simulated. Agents detected: {agents}"
+            self.output.setPlainText(result)
+            self.add_activity("Executed btn_agent_send (status broadcast)")
+            return
+
+        if command == "__service_connect__":
+            result = run_mediator_command(self.project_root, "monitor services health")
+            self.output.setPlainText(result)
+            self.add_activity("Executed btn_service_connect (service ping)")
+            return
+
+        if command == "__figma_pull__":
+            self.reload_from_figma()
+            self.add_activity("Executed btn_figma_pull (design refresh)")
+            return
+
+        if command == "__figma_push__":
+            self.push_backend_snapshot_to_figma()
+            self.add_activity("Executed btn_figma_push (backend snapshot push)")
+            return
+
         result = run_mediator_command(self.project_root, command)
         self.output.setPlainText(f"Project: {self.project_root}\nCommand: {command}\n\n{result}")
+        self.add_activity(f"Executed mediator command: {command}")
+
+    def push_backend_snapshot_to_figma(self) -> None:
+        summary, raw_json = parse_architecture(self.project_root)
+        trimmed_json = raw_json[:3000]
+        message = (
+            "Mediator backend sync update\n"
+            f"Project: {self.project_root.name}\n\n"
+            f"{summary}\n\n"
+            "JSON snippet:\n"
+            f"{trimmed_json}"
+        )
+
+        target_node_id: str | None = None
+        panel = self.named_nodes.get("panel_backend_layers")
+        if isinstance(panel, dict):
+            node_id = panel.get("id")
+            if isinstance(node_id, str):
+                target_node_id = node_id
+
+        result = post_figma_comment(message, target_node_id)
+        self.output.setPlainText(result)
+        self.add_activity(result)
+
+    def copy_naming_contract(self) -> None:
+        contract = (
+            "Naming Conventions\n"
+            "meta_: top tabs\n"
+            "panel_: layout sections\n"
+            "btn_: command buttons\n"
+            "card_: compact info cards\n"
+            "status_: live status widgets\n"
+            "input_: user inputs\n"
+            "log_: log or feed layers\n"
+            "\n"
+            "Recommended names:\n"
+            "meta_backend, meta_agents, meta_monitoring\n"
+            "panel_project_list, panel_backend_layers, panel_dashboard_activity_feed\n"
+            "btn_agent_send, btn_service_connect, btn_figma_pull, btn_figma_push\n"
+        )
+        QApplication.clipboard().setText(contract)
+        self.add_activity("Copied naming contract to clipboard")
 
     def reload_from_figma(self) -> None:
         try:
             figma_json = fetch_figma_file()
             self.named_nodes = figma_named_nodes(figma_json)
-            self.info.setText(
-                f"Loaded {len(self.named_nodes)} named Figma nodes for {self.project_root.name}."
+            self.grouped_nodes = categorize_named_nodes(self.named_nodes)
+            update_figma_constants(self.grouped_nodes)
+
+            counts = (
+                f"tabs={len(FIGMA_META_TABS)}, panels={len(FIGMA_PANELS)}, "
+                f"buttons={len(FIGMA_BUTTONS)}, cards={len(FIGMA_CARDS)}, "
+                f"status={len(FIGMA_STATUS)}, inputs={len(FIGMA_INPUTS)}, logs={len(FIGMA_LOGS)}"
             )
+            self.info.setText(
+                f"Loaded {len(self.named_nodes)} named Figma nodes for {self.project_root.name}. {counts}"
+            )
+            self.add_activity(f"Figma sync completed: {counts}")
             self.build_from_nodes()
         except Exception as exc:  # noqa: BLE001
             self.info.setText("Figma load failed.")
@@ -506,6 +754,7 @@ class LiveFigmaWindow(QWidget):
                 f"Reason: {exc}\n\n"
                 "Set FIGMA_TOKEN and FIGMA_FILE_KEY environment variables and retry."
             )
+            self.add_activity(f"Figma sync failed: {exc}")
 
     def toggle_auto_refresh(self) -> None:
         if self.refresh_timer.isActive():
