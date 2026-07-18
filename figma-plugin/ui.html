@@ -80,6 +80,21 @@
   </div>
 
   <div class="row">
+    <button id="startLive">Start Live Sync</button>
+    <button id="stopLive">Stop Live Sync</button>
+    <label for="pollMs">Interval</label>
+    <select id="pollMs">
+      <option value="2000">2s</option>
+      <option value="3000" selected>3s</option>
+      <option value="5000">5s</option>
+      <option value="10000">10s</option>
+    </select>
+    <label>
+      <input type="checkbox" id="autoApply" checked /> Auto apply
+    </label>
+  </div>
+
+  <div class="row">
     <textarea id="jsonText" spellcheck="false">{
   "textBindings": {
     "panel_backend_layers": "Updated backend summary",

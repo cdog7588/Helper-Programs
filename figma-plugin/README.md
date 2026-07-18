@@ -73,5 +73,6 @@ The plugin also accepts the shortcut form where top-level `panel_`, `status_`, `
 ## Notes
 
 - If a target node is not a text layer, the plugin tries the first descendant text node.
-- For local push, you can host payload JSON on `http://127.0.0.1:8080/figma-plugin` and use the plugin UI Fetch Endpoint button.
+- This manifest currently uses `allowedDomains: ["none"]` for maximum compatibility in Figma dev import.
+- If you need Fetch Endpoint from the plugin UI, you must switch to an HTTPS endpoint and add that exact HTTPS origin to `networkAccess.allowedDomains`.
 - Figma cannot accept inbound arbitrary sockets from your desktop app directly; use pull (plugin fetches endpoint), file import, or webhook-assisted flow.
