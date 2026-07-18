@@ -449,6 +449,7 @@ class LiveFigmaWindow(QWidget):
         self.project_root = project_root
         self.named_nodes: dict[str, dict[str, Any]] = {}
         self.grouped_nodes: dict[str, list[str]] = {}
+        self.pixel_layout_mode = True
 
         self.setWindowTitle(f"Live Figma - {project_root.name}")
         self.resize(1260, 860)
@@ -503,6 +504,10 @@ class LiveFigmaWindow(QWidget):
         self.auto_btn = QPushButton("Enable Auto Refresh (20s)")
         self.auto_btn.clicked.connect(self.toggle_auto_refresh)
         top_row.addWidget(self.auto_btn)
+
+        self.pixel_btn = QPushButton("Pixel Layout: ON")
+        self.pixel_btn.clicked.connect(self.toggle_pixel_layout_mode)
+        top_row.addWidget(self.pixel_btn)
 
         top_row.addStretch(1)
 
@@ -578,6 +583,42 @@ class LiveFigmaWindow(QWidget):
                 continue
         return "#2a3445"
 
+    def _node_bounds(self, node: dict[str, Any]) -> tuple[float, float, float, float] | None:
+        bounds = node.get("absoluteBoundingBox")
+        if not isinstance(bounds, dict):
+            return None
+        try:
+            x = float(bounds.get("x", 0))
+            y = float(bounds.get("y", 0))
+            w = float(bounds.get("width", 0))
+            h = float(bounds.get("height", 0))
+        except (TypeError, ValueError):
+            return None
+        if w <= 0 or h <= 0:
+            return None
+        return (x, y, w, h)
+
+    def _point_in_rect(self, point: tuple[float, float], rect: tuple[float, float, float, float]) -> bool:
+        px, py = point
+        rx, ry, rw, rh = rect
+        return rx <= px <= (rx + rw) and ry <= py <= (ry + rh)
+
+    def _find_parent_panel(
+        self,
+        center: tuple[float, float],
+        panels: list[tuple[str, tuple[float, float, float, float]]],
+    ) -> str | None:
+        containing = [
+            (name, rect)
+            for name, rect in panels
+            if self._point_in_rect(center, rect)
+        ]
+        if not containing:
+            return None
+        # Choose the smallest containing panel for better nesting.
+        containing.sort(key=lambda item: item[1][2] * item[1][3])
+        return containing[0][0]
+
     def add_activity(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
@@ -630,6 +671,9 @@ class LiveFigmaWindow(QWidget):
                 QLabel("No panel_/btn_ named layers found. Add those names in Figma to drive UI structure.")
             )
             self.dynamic_layout.addStretch(1)
+            return
+
+        if self.pixel_layout_mode and self._build_pixel_layout_canvas():
             return
 
         if meta_tabs:
@@ -742,6 +786,101 @@ class LiveFigmaWindow(QWidget):
             self.dynamic_layout.addWidget(log_box)
 
         self.dynamic_layout.addStretch(1)
+
+    def _build_pixel_layout_canvas(self) -> bool:
+        panels: list[tuple[str, tuple[float, float, float, float]]] = []
+        visual_nodes: list[tuple[str, dict[str, Any], tuple[float, float, float, float]]] = []
+
+        for name, node in self.named_nodes.items():
+            if not isinstance(node, dict):
+                continue
+            lowered = name.lower()
+            if not lowered.startswith(("panel_", "btn_", "card_", "status_", "input_", "log_", "meta_", "tab_")):
+                continue
+            bounds = self._node_bounds(node)
+            if bounds is None:
+                continue
+            visual_nodes.append((name, node, bounds))
+            if lowered.startswith("panel_"):
+                panels.append((name, bounds))
+
+        if not visual_nodes:
+            return False
+
+        min_x = min(bounds[0] for _, _, bounds in visual_nodes)
+        min_y = min(bounds[1] for _, _, bounds in visual_nodes)
+        max_x = max(bounds[0] + bounds[2] for _, _, bounds in visual_nodes)
+        max_y = max(bounds[1] + bounds[3] for _, _, bounds in visual_nodes)
+
+        canvas = QWidget()
+        canvas_width = int(max_x - min_x + 32)
+        canvas_height = int(max_y - min_y + 32)
+        canvas.setMinimumSize(max(canvas_width, 480), max(canvas_height, 320))
+        canvas.setStyleSheet("background: #0c111a; border: 1px solid #1f2a3d; border-radius: 8px;")
+
+        panel_widgets: dict[str, tuple[QGroupBox, tuple[float, float, float, float]]] = {}
+        for panel_name, rect in sorted(panels, key=lambda item: item[1][2] * item[1][3], reverse=True):
+            node = self.named_nodes.get(panel_name, {})
+            accent = self._accent_color_for_node(node if isinstance(node, dict) else {})
+            x, y, w, h = rect
+            panel = QGroupBox(self._node_label(panel_name, "panel_"), canvas)
+            panel.setGeometry(int(x - min_x + 12), int(y - min_y + 12), int(w), int(h))
+            panel.setStyleSheet(
+                "QGroupBox { border: 1px solid "
+                + accent
+                + "; border-radius: 8px; color: #d7e7ff; font-weight: 600; }"
+                + "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
+            )
+            panel_widgets[panel_name] = (panel, rect)
+
+        for name, _node, rect in visual_nodes:
+            lowered = name.lower()
+            if lowered.startswith("panel_"):
+                continue
+
+            x, y, w, h = rect
+            center = (x + w / 2.0, y + h / 2.0)
+            parent_panel_name = self._find_parent_panel(center, panels)
+
+            if parent_panel_name and parent_panel_name in panel_widgets:
+                parent_widget, parent_rect = panel_widgets[parent_panel_name]
+                px, py, _pw, _ph = parent_rect
+                rel_x = int(x - px)
+                rel_y = int(y - py)
+                host = parent_widget
+            else:
+                rel_x = int(x - min_x + 12)
+                rel_y = int(y - min_y + 12)
+                host = canvas
+
+            width = max(int(w), 56)
+            height = max(int(h), 22)
+
+            if lowered.startswith("btn_"):
+                button = QPushButton(self._node_label(name, "btn_"), host)
+                button.setGeometry(rel_x, rel_y, width, height)
+                button.setToolTip(name)
+                command = self.command_for_button_name(name)
+                if command is None:
+                    button.clicked.connect(
+                        lambda _checked=False, n=name: self.output.setPlainText(
+                            f"No command mapping for {n}.\nUse btn_agent_send, btn_service_connect, btn_figma_pull, btn_figma_push, or extend mapping."
+                        )
+                    )
+                else:
+                    button.clicked.connect(lambda _checked=False, c=command: self.run_command(c))
+            elif lowered.startswith("card_"):
+                card = QGroupBox(self._node_label(name, "card_"), host)
+                card.setGeometry(rel_x, rel_y, width, height)
+                card.setStyleSheet("QGroupBox { border: 1px solid #3a4b66; border-radius: 6px; }")
+            else:
+                label = QLabel(self._node_label(name, lowered.split("_")[0] + "_"), host)
+                label.setGeometry(rel_x, rel_y, width, height)
+                label.setStyleSheet("color: #a8b9d4; border: 1px dashed #33445f; padding-left: 4px;")
+
+        self.dynamic_layout.addWidget(canvas)
+        self.add_activity("Rendered in pixel layout mode using Figma geometry")
+        return True
 
     def _add_dynamic_button(self, layout: QHBoxLayout | QVBoxLayout, button_name: str) -> None:
         button_text = button_name.replace("btn_", "").replace("_", " ").title()
@@ -912,6 +1051,14 @@ class LiveFigmaWindow(QWidget):
         else:
             self.refresh_timer.start()
             self.auto_btn.setText("Disable Auto Refresh")
+
+    def toggle_pixel_layout_mode(self) -> None:
+        self.pixel_layout_mode = not self.pixel_layout_mode
+        self.pixel_btn.setText("Pixel Layout: ON" if self.pixel_layout_mode else "Pixel Layout: OFF")
+        self.add_activity(
+            "Pixel layout mode enabled" if self.pixel_layout_mode else "Pixel layout mode disabled"
+        )
+        self.build_from_nodes()
 
 
 class MediatorDesktopWindow(QWidget):
