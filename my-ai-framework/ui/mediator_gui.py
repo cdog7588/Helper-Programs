@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,7 @@ else:
 
 APP_STATE_DIR = Path.home() / ".mediator_desktop"
 PROJECTS_FILE = APP_STATE_DIR / "projects.json"
+MAKE_IMPORTS_DIR = APP_STATE_DIR / "make_imports"
 FIGMA_SYNC_LOG = APP_STATE_DIR / "figma_sync.log"
 FIGMA_DESIGN_CACHE = APP_STATE_DIR / "figma_design_cache.json"
 PLUGIN_CONTRACT_REL_PATH = Path(".mediator") / "figma_plugin_contract.json"
@@ -96,6 +98,80 @@ def load_projects() -> list[str]:
 def save_projects(project_paths: list[str]) -> None:
     APP_STATE_DIR.mkdir(parents=True, exist_ok=True)
     PROJECTS_FILE.write_text(json.dumps(project_paths, indent=2), encoding="utf-8")
+
+
+def infer_make_project_root(extracted_root: Path) -> Path:
+    root_package = extracted_root / "package.json"
+    if root_package.exists():
+        return extracted_root
+
+    child_dirs = sorted(
+        [child for child in extracted_root.iterdir() if child.is_dir()],
+        key=lambda path: str(path).lower(),
+    )
+    if len(child_dirs) == 1 and (child_dirs[0] / "package.json").exists():
+        return child_dirs[0]
+
+    candidates: list[Path] = []
+    for child in child_dirs:
+        nested_dirs = sorted(
+            [nested for nested in child.iterdir() if nested.is_dir()],
+            key=lambda path: str(path).lower(),
+        )
+        for nested in nested_dirs:
+            if (nested / "package.json").exists():
+                candidates.append(nested)
+
+    if candidates:
+        candidates.sort(key=lambda path: str(path).lower())
+        return candidates[0]
+
+    return extracted_root
+
+
+def is_react_make_project(project_root: Path) -> bool:
+    package_path = project_root / "package.json"
+    if not package_path.exists():
+        return False
+
+    try:
+        package_json = json.loads(package_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    dependencies = package_json.get("dependencies", {}) if isinstance(package_json, dict) else {}
+    dev_dependencies = package_json.get("devDependencies", {}) if isinstance(package_json, dict) else {}
+    scripts = package_json.get("scripts", {}) if isinstance(package_json, dict) else {}
+
+    if not isinstance(dependencies, dict):
+        dependencies = {}
+    if not isinstance(dev_dependencies, dict):
+        dev_dependencies = {}
+    if not isinstance(scripts, dict):
+        scripts = {}
+
+    if "react" in dependencies or "react" in dev_dependencies:
+        return True
+
+    if any(key in scripts for key in ("dev", "start", "build")):
+        return True
+
+    if (project_root / "src").exists():
+        return True
+
+    return False
+
+
+def import_make_zip_to_local(zip_path: Path) -> Path:
+    MAKE_IMPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    extract_dir = MAKE_IMPORTS_DIR / f"{zip_path.stem}_{stamp}"
+    extract_dir.mkdir(parents=True, exist_ok=True)
+
+    with zipfile.ZipFile(zip_path, "r") as zip_file:
+        zip_file.extractall(extract_dir)
+
+    return infer_make_project_root(extract_dir).resolve()
 
 
 def _extract_controller_endpoints(file_path: Path) -> list[dict[str, str]]:
@@ -1665,6 +1741,14 @@ class MediatorDesktopWindow(QWidget):
         remove_btn.clicked.connect(self.remove_selected_project)
         button_row.addWidget(remove_btn)
 
+        import_make_zip_btn = QPushButton("Import Figma Make Export (.zip)")
+        import_make_zip_btn.clicked.connect(self.import_figma_make_zip)
+        button_row.addWidget(import_make_zip_btn)
+
+        add_make_project_btn = QPushButton("Add Figma Make Project Folder")
+        add_make_project_btn.clicked.connect(self.add_figma_make_project)
+        button_row.addWidget(add_make_project_btn)
+
         open_arch_btn = QPushButton("Open Architecture Window")
         open_arch_btn.clicked.connect(self.open_architecture_window)
         button_row.addWidget(open_arch_btn)
@@ -1712,13 +1796,91 @@ class MediatorDesktopWindow(QWidget):
         if not folder:
             return
 
-        resolved = str(Path(folder).resolve())
-        if resolved not in self.projects:
-            self.projects.append(resolved)
-            save_projects(self.projects)
-            self.refresh_project_list()
-        else:
+        if not self._register_project(Path(folder)):
             QMessageBox.information(self, "Already added", "That project is already in the list.")
+
+    def _register_project(self, project_root: Path) -> bool:
+        resolved = str(project_root.resolve())
+        if resolved in self.projects:
+            return False
+
+        self.projects.append(resolved)
+        save_projects(self.projects)
+        self.refresh_project_list()
+
+        for index in range(self.project_list.count()):
+            item = self.project_list.item(index)
+            if item is not None and item.text() == resolved:
+                self.project_list.setCurrentRow(index)
+                break
+
+        return True
+
+    def add_figma_make_project(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "Choose Figma Make project folder")
+        if not folder:
+            return
+
+        project_root = Path(folder).resolve()
+        if not project_root.exists():
+            QMessageBox.warning(self, "Missing folder", f"Project folder not found: {project_root}")
+            return
+
+        if not is_react_make_project(project_root):
+            answer = QMessageBox.question(
+                self,
+                "React project not detected",
+                "Could not confirm this looks like a Figma Make React project (missing React/package.json signals).\n"
+                "Add it anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        added = self._register_project(project_root)
+        if added:
+            self.status.setText(f"Added Figma Make project: {project_root}")
+        else:
+            self.status.setText(f"Project already added: {project_root}")
+            QMessageBox.information(self, "Already added", "That project is already in the list.")
+
+    def import_figma_make_zip(self) -> None:
+        zip_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose Figma Make export zip",
+            "",
+            "Zip archives (*.zip);;All files (*.*)",
+        )
+        if not zip_file:
+            return
+
+        try:
+            imported_root = import_make_zip_to_local(Path(zip_file))
+            if not imported_root.exists():
+                QMessageBox.warning(self, "Import failed", f"Imported folder not found: {imported_root}")
+                return
+
+            if not is_react_make_project(imported_root):
+                answer = QMessageBox.question(
+                    self,
+                    "React project not detected",
+                    "Imported export did not clearly match a React Make project.\n"
+                    "Add it anyway?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+
+            added = self._register_project(imported_root)
+            if added:
+                self.status.setText(f"Imported Figma Make export: {imported_root}")
+            else:
+                self.status.setText(f"Imported project already added: {imported_root}")
+                QMessageBox.information(self, "Already added", "That project is already in the list.")
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Import error", f"Could not import Figma Make zip:\n{exc}")
 
     def remove_selected_project(self) -> None:
         current = self.project_list.currentItem()
