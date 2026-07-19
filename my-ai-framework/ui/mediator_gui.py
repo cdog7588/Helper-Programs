@@ -1511,7 +1511,7 @@ class LiveFigmaWindow(QWidget):
         }
 
     def build_figma_rename_payload(self) -> dict[str, Any]:
-        required_tabs = [
+        base_required_tabs = [
             "meta_tab_dashboard",
             "meta_tab_backend_architecture",
             "meta_tab_frontend_architecture",
@@ -1519,7 +1519,7 @@ class LiveFigmaWindow(QWidget):
             "meta_tab_projects_services",
             "meta_tab_mediator_control",
         ]
-        required_panels = [
+        base_required_panels = [
             "panel_dashboard_activity_feed",
             "panel_dashboard_log",
             "panel_backend_layers",
@@ -1532,6 +1532,25 @@ class LiveFigmaWindow(QWidget):
             "panel_mediator_output",
             "panel_logs",
         ]
+
+        detected_tabs = sorted(
+            [name for name in self.named_nodes.keys() if name.lower().startswith("meta_tab_")],
+            key=lambda value: value.lower(),
+        )
+        detected_panels = sorted(
+            [name for name in self.named_nodes.keys() if name.lower().startswith("panel_")],
+            key=lambda value: value.lower(),
+        )
+
+        required_tabs = sorted(
+            set(base_required_tabs).union(detected_tabs),
+            key=lambda value: value.lower(),
+        )
+        required_panels = sorted(
+            set(base_required_panels).union(detected_panels),
+            key=lambda value: value.lower(),
+        )
+
         return {
             "meta": {
                 "source": "mediator_app",
@@ -1576,6 +1595,8 @@ class LiveFigmaWindow(QWidget):
         output = (
             "Generated naming-contract rewrite payload.\n"
             "Note: plugin-side rewrite handler is required to execute rename/panelRename/createHiddenLayers.\n\n"
+            f"Tabs in payload: {len(payload.get('autoCreate', {}).get('tabs', []))}\n"
+            f"Panels in payload: {len(payload.get('autoCreate', {}).get('panels', []))}\n"
             f"{local_push_result}\n"
             f"Rename payload saved: {payload_path}"
         )
